@@ -1,0 +1,14 @@
+.agents/
+.codex/
+molin_docs/
+
+node_modules/
+dist/
+coverage/
+
+.env
+.env.local
+.env.*.local
+
+*.log
+npm-debug.log*
