@@ -10,7 +10,11 @@ import type {
   ImageTaskRecord,
   ImageTasksRepository
 } from "../infrastructure/database/image-tasks-repository.js";
-import type { FileService } from "../modules/files/file-service.js";
+import {
+  FileServiceError,
+  type FileContentResult,
+  type FileService
+} from "../modules/files/file-service.js";
 import type {
   ImageTaskService,
   PublicImageTask
@@ -50,8 +54,12 @@ export class ImageGenerationWorkerService {
       return await this.processImageRestoreTask(task);
     }
 
+    if (task.task_type === "upscale") {
+      return await this.processUpscaleTask(task);
+    }
+
     if (task.task_type !== "text_to_image") {
-      throw new Error("当前 worker 只处理文生图、图生文、图生图和图片修复任务。");
+      throw new Error("当前 worker 只处理文生图、图生文、图生图、图片修复和高清放大任务。");
     }
 
     if (task.prompt === null || task.prompt.trim().length === 0) {
@@ -145,7 +153,11 @@ export class ImageGenerationWorkerService {
   private async processImageToImageTask(task: ImageTaskRecord): Promise<ProcessImageTaskResult> {
     return await this.processImageEditTask(task, {
       operation: "image_to_image",
-      prompt: buildImageEditPrompt(task.prompt, task.style_preset_id),
+      resolveRequest: () => ({
+        prompt: buildImageEditPrompt(task.prompt, task.style_preset_id),
+        size: task.image_size ?? "1024x1024",
+        count: task.image_count
+      }),
       unavailableMessage: "图生图模型服务暂不可用。",
       inputRequiredMessage: "图生图任务必须上传一张参考图。",
       gatewayFailedMessage: "AI 网关图生图调用失败。",
@@ -156,7 +168,11 @@ export class ImageGenerationWorkerService {
   private async processImageRestoreTask(task: ImageTaskRecord): Promise<ProcessImageTaskResult> {
     return await this.processImageEditTask(task, {
       operation: "image_restore",
-      prompt: buildImageRestorePrompt(task.prompt, task.style_preset_id),
+      resolveRequest: () => ({
+        prompt: buildImageRestorePrompt(task.prompt, task.style_preset_id),
+        size: task.image_size ?? "1024x1024",
+        count: task.image_count
+      }),
       unavailableMessage: "图片修复模型服务暂不可用。",
       inputRequiredMessage: "图片修复任务必须上传一张原图。",
       gatewayFailedMessage: "AI 网关图片修复调用失败。",
@@ -164,11 +180,56 @@ export class ImageGenerationWorkerService {
     });
   }
 
+  private async processUpscaleTask(task: ImageTaskRecord): Promise<ProcessImageTaskResult> {
+    const factor = task.upscale_factor;
+
+    if (factor !== 2 && factor !== 4) {
+      return await this.failTask(task, "UPSCALE_FACTOR_INVALID", "高清放大倍率只支持 2x 或 4x。");
+    }
+
+    return await this.processImageEditTask(task, {
+      operation: "upscale",
+      resolveRequest: (inputFile) => {
+        const inputWidth = inputFile.file.width;
+        const inputHeight = inputFile.file.height;
+
+        if (inputWidth === null || inputHeight === null) {
+          throw new FileServiceError(
+            "INPUT_IMAGE_DIMENSIONS_MISSING",
+            "无法识别原图宽高，不能执行高清放大。",
+            400
+          );
+        }
+
+        const targetWidth = resolveUpscaleTargetDimension(inputWidth, factor);
+        const targetHeight = resolveUpscaleTargetDimension(inputHeight, factor);
+
+        return {
+          prompt: buildUpscalePrompt(factor, targetWidth, targetHeight),
+          size: `${String(targetWidth)}x${String(targetHeight)}`,
+          count: 1,
+          expectedWidth: targetWidth,
+          expectedHeight: targetHeight
+        };
+      },
+      unavailableMessage: "高清放大模型服务暂不可用。",
+      inputRequiredMessage: "高清放大任务必须上传一张原图。",
+      gatewayFailedMessage: "AI 网关高清放大调用失败。",
+      outputFileLabel: `upscale_${String(factor)}x`
+    });
+  }
+
   private async processImageEditTask(
     task: ImageTaskRecord,
     options: {
-      operation: "image_to_image" | "image_restore";
-      prompt: string;
+      operation: "image_to_image" | "image_restore" | "upscale";
+      resolveRequest: (inputFile: FileContentResult) => {
+        prompt: string;
+        size: string;
+        count: number;
+        expectedWidth?: number;
+        expectedHeight?: number;
+      };
       unavailableMessage: string;
       inputRequiredMessage: string;
       gatewayFailedMessage: string;
@@ -203,13 +264,14 @@ export class ImageGenerationWorkerService {
         task.owner_user_id,
         task.input_file_ids[0] ?? ""
       );
+      const editRequest = options.resolveRequest(inputFile);
       const edited = await this.imageEditClient.editImage({
         imageBase64: inputFile.content_base64,
         imageMimeType: inputFile.file.mime_type,
-        prompt: options.prompt,
+        prompt: editRequest.prompt,
         model: task.gateway_model_code ?? "image_edit",
-        size: task.image_size ?? "1024x1024",
-        count: task.image_count
+        size: editRequest.size,
+        count: editRequest.count
       });
       gatewayCompleted = true;
       const outputFileIds: string[] = [];
@@ -221,7 +283,10 @@ export class ImageGenerationWorkerService {
           fileName: `${task.id}_${options.outputFileLabel}_${String(index + 1)}.png`,
           mimeType: image.mime_type,
           contentBase64: image.content_base64,
-          fileType: "output"
+          fileType: "output",
+          generatedAsset: options.operation === "upscale",
+          expectedWidth: editRequest.expectedWidth,
+          expectedHeight: editRequest.expectedHeight
         });
 
         outputFileIds.push(uploaded.file.id);
@@ -237,7 +302,7 @@ export class ImageGenerationWorkerService {
         latency_ms: Date.now() - startedAt,
         success: true,
         usage_json: edited.usage,
-        input_summary: `input_file=${task.input_file_ids[0] ?? ""}; mode=${task.style_preset_id ?? "custom"}; prompt=${summarizeText(options.prompt)}`,
+        input_summary: `input_file=${task.input_file_ids[0] ?? ""}; mode=${task.style_preset_id ?? "custom"}; prompt=${summarizeText(editRequest.prompt)}`,
         output_summary: `generated_files=${String(outputFileIds.length)}`,
         error_code: null,
         error_message: null
@@ -252,7 +317,12 @@ export class ImageGenerationWorkerService {
       });
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : options.gatewayFailedMessage;
-      const errorCode = gatewayCompleted ? "FILE_STORAGE_FAILED" : "AI_GATEWAY_FAILED";
+      const errorCode =
+        error instanceof FileServiceError
+          ? error.code
+          : gatewayCompleted
+            ? "FILE_STORAGE_FAILED"
+            : "AI_GATEWAY_FAILED";
 
       try {
         await this.aiGatewayLogsRepository.create({
@@ -265,7 +335,7 @@ export class ImageGenerationWorkerService {
           latency_ms: Date.now() - startedAt,
           success: false,
           usage_json: null,
-          input_summary: `input_file=${task.input_file_ids[0] ?? ""}; mode=${task.style_preset_id ?? "custom"}; prompt=${summarizeText(options.prompt)}`,
+          input_summary: `input_file=${task.input_file_ids[0] ?? ""}; mode=${task.style_preset_id ?? "custom"}`,
           output_summary: null,
           error_code: errorCode,
           error_message: message
@@ -423,6 +493,28 @@ function resolveImageRestoreTypeInstruction(restoreType: string | null): string 
   };
 
   return instructions[restoreType ?? ""] ?? "请修复图片质量问题并自然增强画面细节。";
+}
+
+function buildUpscalePrompt(factor: 2 | 4, targetWidth: number, targetHeight: number): string {
+  return [
+    `请将输入图片高清放大 ${String(factor)} 倍，输出尺寸必须为 ${String(targetWidth)}x${String(targetHeight)} 像素。`,
+    "保持原始主体、构图、色彩和画面内容不变，增强真实细节，减少锯齿、噪点和压缩伪影。",
+    "不要添加新主体、文字、水印或改变人物身份。"
+  ].join("\n");
+}
+
+function resolveUpscaleTargetDimension(source: number, factor: 2 | 4): number {
+  const target = source * factor;
+
+  if (!Number.isSafeInteger(target) || target > 32_768) {
+    throw new FileServiceError(
+      "UPSCALE_TARGET_TOO_LARGE",
+      "放大后的目标尺寸超过 32768 像素限制。",
+      400
+    );
+  }
+
+  return target;
 }
 
 function buildVisionTextPrompt(prompt: string | null): string {

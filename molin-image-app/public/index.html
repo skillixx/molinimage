@@ -34,6 +34,7 @@
             <button class="mode-tab" type="button" data-mode="image_to_text">图生文</button>
             <button class="mode-tab" type="button" data-mode="image_to_image">图生图</button>
             <button class="mode-tab" type="button" data-mode="image_restore">图片修复</button>
+            <button class="mode-tab" type="button" data-mode="upscale">高清放大</button>
           </nav>
 
           <div class="work-surface">
@@ -43,7 +44,7 @@
                 <h2 id="modeTitle">文生图</h2>
               </div>
 
-              <label class="field">
+              <label class="field" id="promptField">
                 <span>提示词</span>
                 <textarea
                   id="promptInput"
@@ -82,12 +83,20 @@
                 </select>
               </label>
 
+              <label class="field" id="upscaleFactorField" hidden>
+                <span>高清倍率</span>
+                <select id="upscaleFactorSelect">
+                  <option value="2">2x</option>
+                  <option value="4">4x</option>
+                </select>
+              </label>
+
               <div class="field-grid">
                 <label class="field">
                   <span>模型</span>
                   <select id="modelSelect"></select>
                 </label>
-                <label class="field">
+                <label class="field" id="sizeField">
                   <span>尺寸</span>
                   <select id="sizeSelect">
                     <option value="1024x1024">1024x1024</option>
@@ -95,7 +104,7 @@
                     <option value="1536x1024">1536x1024</option>
                   </select>
                 </label>
-                <label class="field">
+                <label class="field" id="countField">
                   <span>数量</span>
                   <select id="countSelect">
                     <option value="1">1</option>

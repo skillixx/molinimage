@@ -66,6 +66,14 @@ void test("作品历史管理 migration 独立补齐软删除和收藏索引", a
   assert.match(sql, /uk_user_collections_owner_task/i);
 });
 
+void test("高清放大 migration 为任务增加倍率字段并支持回滚", async () => {
+  const upSql = await readFile(resolve("migrations", "003_add_upscale_factor.up.sql"), "utf8");
+  const downSql = await readFile(resolve("migrations", "003_add_upscale_factor.down.sql"), "utf8");
+
+  assert.match(upSql, /ADD COLUMN upscale_factor TINYINT UNSIGNED NULL/i);
+  assert.match(downSql, /DROP COLUMN upscale_factor/i);
+});
+
 async function readAllUpMigrations(): Promise<string> {
   const migrationsDir = resolve("migrations");
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".up.sql")).sort();

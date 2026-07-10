@@ -23,19 +23,59 @@ void test("上传文件时内容写入存储，MySQL 元数据只保存 provider
     storagePresignedUrlTtlSeconds: 300
   });
 
+  const png = createPngHeader(320, 180);
   const result = await service.uploadFile({
     ownerUserId: 479,
     fileName: "avatar.png",
     mimeType: "image/png",
-    contentBase64: Buffer.from("fake image bytes").toString("base64")
+    contentBase64: png.toString("base64")
   });
 
   assert.equal(storage.uploads.length, 1);
-  assert.equal(storage.uploads[0]?.body.toString("utf8"), "fake image bytes");
+  assert.deepEqual(storage.uploads[0]?.body, png);
   assert.equal(result.file.storage_provider, "minio");
   assert.equal(result.file.storage_bucket, "molinimage");
   assert.match(result.file.storage_key, /^uploads\/479\/\d{4}\/\d{2}\/file_[a-f0-9]+\.png$/u);
   assert.equal(Object.hasOwn(result.file, "content_base64"), false);
+  assert.equal(result.file.width, 320);
+  assert.equal(result.file.height, 180);
+});
+
+void test("高清放大结果可超过用户上传 10MB 限制但仍受生成资产上限保护", async () => {
+  const repository = new InMemoryFilesRepository();
+  const storage = new FakeStorageService();
+  const service = new FileService(repository, storage, {
+    storageProvider: "minio",
+    storageBucket: "molinimage",
+    storagePresignedUrlTtlSeconds: 300
+  });
+  const largePng = Buffer.alloc(10 * 1024 * 1024 + 1);
+  createPngHeader(4096, 4096).copy(largePng);
+  const contentBase64 = largePng.toString("base64");
+
+  await assert.rejects(
+    () =>
+      service.uploadFile({
+        ownerUserId: 479,
+        fileName: "large-upload.png",
+        mimeType: "image/png",
+        contentBase64
+      }),
+    (error: unknown) => error instanceof FileServiceError && error.code === "FILE_TOO_LARGE"
+  );
+  const generated = await service.uploadFile({
+    ownerUserId: 479,
+    fileName: "upscale-output.png",
+    mimeType: "image/png",
+    contentBase64,
+    generatedAsset: true,
+    expectedWidth: 4096,
+    expectedHeight: 4096
+  });
+
+  assert.equal(generated.file.size_bytes, largePng.byteLength);
+  assert.equal(generated.file.width, 4096);
+  assert.equal(generated.file.height, 4096);
 });
 
 void test("只能为自己的文件生成预签名 URL", async () => {
@@ -91,8 +131,8 @@ class InMemoryFilesRepository implements FilesRepository {
   create(input: CreateFileRecordInput): Promise<FileRecord> {
     const record: FileRecord = {
       ...input,
-      width: null,
-      height: null,
+      width: input.width ?? null,
+      height: input.height ?? null,
       created_at: new Date("2026-07-09T00:00:00.000Z").toISOString()
     };
 
@@ -158,4 +198,13 @@ function createRecord(
     size_bytes: 10,
     checksum: "checksum"
   };
+}
+
+function createPngHeader(width: number, height: number): Buffer {
+  const buffer = Buffer.alloc(24);
+  Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").copy(buffer);
+  buffer.writeUInt32BE(width, 16);
+  buffer.writeUInt32BE(height, 20);
+
+  return buffer;
 }

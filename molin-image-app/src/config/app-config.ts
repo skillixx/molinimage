@@ -107,7 +107,7 @@ export function loadAppConfig(env: AppEnv = process.env): AppConfig {
     ),
     billingRulesJson: readOptionalText(
       env.BILLING_RULES_JSON,
-      `[{"task_type":"text_to_image","usage_type":"image_text_to_image","unit":"credits","points_per_unit":"6","active":true},{"task_type":"image_to_image","usage_type":"image_to_image","unit":"credits","points_per_unit":"8","active":true},{"task_type":"image_restore","usage_type":"image_restore","unit":"credits","points_per_unit":"5","active":true},{"task_type":"image_to_text","usage_type":"image_to_text","unit":"credits","points_per_unit":"1","active":true},{"task_type":"upscale","usage_type":"image_upscale","unit":"credits","points_per_unit":"4","active":true}]`
+      `[{"task_type":"text_to_image","usage_type":"image_text_to_image","unit":"credits","points_per_unit":"6","active":true},{"task_type":"image_to_image","usage_type":"image_to_image","unit":"credits","points_per_unit":"8","active":true},{"task_type":"image_restore","usage_type":"image_restore","unit":"credits","points_per_unit":"5","active":true},{"task_type":"image_to_text","usage_type":"image_to_text","unit":"credits","points_per_unit":"1","active":true},{"task_type":"upscale","usage_type":"image_upscale","unit":"credits","points_per_unit":"4","upscale_factor":2,"active":true},{"task_type":"upscale","usage_type":"image_upscale","unit":"credits","points_per_unit":"8","upscale_factor":4,"active":true}]`
     ),
     billingMockBalancePoints: readOptionalText(env.BILLING_MOCK_BALANCE_POINTS, "1000000"),
     internalApiToken: readRequiredEnv(env, "INTERNAL_API_TOKEN"),

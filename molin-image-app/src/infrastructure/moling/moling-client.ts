@@ -5,7 +5,10 @@ import type {
   EntitlementReleaseResult,
   EntitlementReserveGateway,
   EntitlementReserveInput,
-  EntitlementReserveResult
+  EntitlementReserveResult,
+  EntitlementSettleGateway,
+  EntitlementSettleInput,
+  EntitlementSettleResult
 } from "../../modules/billing/billing-service.js";
 import { BillingServiceError } from "../../modules/billing/billing-service.js";
 
@@ -31,7 +34,11 @@ export class MolingTicketError extends Error {
 }
 
 export class MolingClient
-  implements LaunchTicketVerifier, EntitlementReserveGateway, EntitlementReleaseGateway
+  implements
+    LaunchTicketVerifier,
+    EntitlementReserveGateway,
+    EntitlementReleaseGateway,
+    EntitlementSettleGateway
 {
   constructor(private readonly config: Pick<AppConfig, "molingApiBaseUrl" | "internalApiToken">) {}
 
@@ -122,6 +129,36 @@ export class MolingClient
 
     if (!response.ok) {
       throw new BillingServiceError("BILLING_RELEASE_FAILED", "墨灵积分释放失败。", 502);
+    }
+
+    const payload = await response.json().catch(() => ({}));
+    const source = unwrapDataObject(payload);
+
+    return {
+      reserveId: readOptionalStringOrNumberField(source, "hold_id", "holdId") ?? input.reserveId
+    };
+  }
+
+  async settle(input: EntitlementSettleInput): Promise<EntitlementSettleResult> {
+    const response = await fetch(
+      new URL("/api/internal/entitlement-settle", this.config.molingApiBaseUrl),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-internal-token": this.config.internalApiToken
+        },
+        // 墨灵结算接口使用原 hold_id 和实际积分，任务侧稳定幂等键负责防止重复调用。
+        body: JSON.stringify({
+          hold_id: coerceNumericHoldId(input.reserveId),
+          actual_amount: input.actualAmount,
+          idempotency_key: input.idempotencyKey
+        })
+      }
+    );
+
+    if (!response.ok) {
+      throw new BillingServiceError("BILLING_SETTLE_FAILED", "墨灵积分结算失败。", 502);
     }
 
     const payload = await response.json().catch(() => ({}));

@@ -4,12 +4,18 @@ import test from "node:test";
 import type {
   BillingEventRecord,
   BillingEventsRepository,
+  ClaimSettleBillingEventInput,
+  CompleteSettleBillingEventInput,
   CreateReservedBillingEventInput
 } from "../src/infrastructure/database/billing-events-repository.js";
 import {
   BillingService,
   BillingServiceError,
   MockEntitlementReserveGateway
+} from "../src/modules/billing/billing-service.js";
+import type {
+  EntitlementSettleInput,
+  EntitlementSettleResult
 } from "../src/modules/billing/billing-service.js";
 
 const rulesJson = JSON.stringify([
@@ -25,6 +31,22 @@ const rulesJson = JSON.stringify([
     usage_type: "image_to_text",
     unit: "credits",
     points_per_unit: "1",
+    active: true
+  },
+  {
+    task_type: "upscale",
+    usage_type: "image_upscale",
+    unit: "credits",
+    points_per_unit: "4",
+    upscale_factor: 2,
+    active: true
+  },
+  {
+    task_type: "upscale",
+    usage_type: "image_upscale",
+    unit: "credits",
+    points_per_unit: "8",
+    upscale_factor: 4,
     active: true
   }
 ]);
@@ -46,6 +68,28 @@ void test("计费估算会按任务参数变化重新计算预计积分", () => 
   assert.equal(oneImage.estimated_points, "6");
   assert.equal(threeImages.estimated_points, "18");
   assert.equal(threeImages.enough_balance, true);
+});
+
+void test("高清放大 2x 和 4x 使用不同价格规则", () => {
+  const service = createBillingService("100");
+
+  const twoTimes = service.estimate({
+    ownerUserId: 479,
+    taskType: "upscale",
+    imageCount: 1,
+    upscaleFactor: 2
+  });
+  const fourTimes = service.estimate({
+    ownerUserId: 479,
+    taskType: "upscale",
+    imageCount: 1,
+    upscaleFactor: 4
+  });
+
+  assert.equal(twoTimes.unit_points, "4");
+  assert.equal(twoTimes.estimated_points, "4");
+  assert.equal(fourTimes.unit_points, "8");
+  assert.equal(fourTimes.estimated_points, "8");
 });
 
 void test("预占计费事件具备稳定幂等键并落库", async () => {
@@ -111,6 +155,110 @@ void test("失败释放会归还预占积分，并用 release 幂等键防重复
   assert.equal(releasedAgain.billing_event.id, released.billing_event.id);
   assert.equal(gateway.getBalancePoints(), "100");
   assert.equal(repository.events.filter((event) => event.event_type === "release").length, 1);
+});
+
+void test("成功结算使用稳定幂等键且不会重复写入 settle 事件", async () => {
+  const repository = new InMemoryBillingEventsRepository();
+  const gateway = new MockEntitlementReserveGateway("100");
+  const service = new BillingService(rulesJson, repository, gateway);
+  const reserved = await service.reserve({
+    ownerUserId: 479,
+    taskId: "task_billing_settle_001",
+    taskType: "upscale",
+    imageCount: 1,
+    upscaleFactor: 4,
+    entitlementId: 62,
+    idempotencyKey: "task_billing_settle_001:upscale:reserve"
+  });
+  const request = {
+    ownerUserId: 479,
+    taskId: "task_billing_settle_001",
+    reserveBillingEventId: reserved.billing_event.id,
+    idempotencyKey: "task_billing_settle_001:upscale:settle"
+  };
+
+  const [settled, settledAgain] = await Promise.all([
+    service.settle(request),
+    service.settle(request)
+  ]);
+
+  assert.equal(settled.settled, true);
+  assert.equal(settled.billing_event.amount_points, "8");
+  assert.equal(settledAgain.billing_event.id, settled.billing_event.id);
+  assert.equal(gateway.getSettleCallCount(), 1);
+  assert.equal(repository.events.filter((event) => event.event_type === "settle").length, 1);
+});
+
+void test("待对账结算只能由一个重试者重新抢占并完成", async () => {
+  const repository = new InMemoryBillingEventsRepository();
+  const gateway = new FlakySettleGateway("100");
+  const service = new BillingService(rulesJson, repository, gateway);
+  const reserved = await service.reserve({
+    ownerUserId: 479,
+    taskId: "task_billing_reconcile_001",
+    taskType: "upscale",
+    imageCount: 1,
+    upscaleFactor: 2,
+    entitlementId: 62,
+    idempotencyKey: "task_billing_reconcile_001:upscale:reserve"
+  });
+  const request = {
+    ownerUserId: 479,
+    taskId: "task_billing_reconcile_001",
+    reserveBillingEventId: reserved.billing_event.id,
+    idempotencyKey: "task_billing_reconcile_001:upscale:settle"
+  };
+
+  const pending = await service.settle(request);
+  gateway.allowSettle();
+  const [reconciled, duplicate] = await Promise.all([
+    service.settle({ ...request, retryPending: true }),
+    service.settle({ ...request, retryPending: true })
+  ]);
+
+  assert.equal(pending.settled, false);
+  assert.equal(reconciled.settled, true);
+  assert.equal(duplicate.billing_event.id, reconciled.billing_event.id);
+  assert.equal(repository.events.at(-1)?.status, "settled");
+  assert.equal(repository.events.at(-1)?.retry_count, 1);
+});
+
+void test("结算版本栅栏拒绝旧 worker 在租约接管后迟到写回", async () => {
+  const repository = new InMemoryBillingEventsRepository();
+  const claimInput: ClaimSettleBillingEventInput = {
+    id: "billing_settle_fence_001",
+    owner_user_id: 479,
+    task_id: "task_fence_001",
+    amount_points: "8",
+    idempotency_key: "task_fence_001:upscale:settle",
+    moling_reserve_id: "hold_fence_001",
+    moling_entitlement_id: 62,
+    retry_pending: false
+  };
+  const firstClaim = await repository.claimSettle(claimInput);
+  firstClaim.event.status = "settle_pending";
+  const retryClaim = await repository.claimSettle({ ...claimInput, retry_pending: true });
+
+  const staleCompletion = await repository.completeSettle({
+    eventId: firstClaim.event.id,
+    expectedRetryCount: 0,
+    status: "settled",
+    errorCode: null,
+    errorMessage: null
+  });
+
+  assert.equal(staleCompletion.status, "settling");
+  assert.equal(staleCompletion.retry_count, 1);
+
+  const currentCompletion = await repository.completeSettle({
+    eventId: retryClaim.event.id,
+    expectedRetryCount: 1,
+    status: "settled",
+    errorCode: null,
+    errorMessage: null
+  });
+
+  assert.equal(currentCompletion.status, "settled");
 });
 
 void test("余额不足时预占失败，不能继续创建任务", async () => {
@@ -199,11 +347,84 @@ class InMemoryBillingEventsRepository implements BillingEventsRepository {
     return Promise.resolve(event);
   }
 
+  claimSettle(
+    input: ClaimSettleBillingEventInput
+  ): Promise<{ event: BillingEventRecord; claimed: boolean }> {
+    const existing = this.events.find((event) => event.idempotency_key === input.idempotency_key);
+
+    if (existing !== undefined) {
+      if (input.retry_pending && existing.status === "settle_pending") {
+        existing.status = "settling";
+        existing.retry_count += 1;
+
+        return Promise.resolve({ event: existing, claimed: true });
+      }
+
+      return Promise.resolve({ event: existing, claimed: false });
+    }
+
+    const event: BillingEventRecord = {
+      id: input.id,
+      owner_user_id: input.owner_user_id,
+      task_id: input.task_id,
+      event_type: "settle",
+      amount_points: input.amount_points,
+      status: "settling",
+      idempotency_key: input.idempotency_key,
+      moling_reserve_id: input.moling_reserve_id,
+      moling_entitlement_id: input.moling_entitlement_id,
+      error_code: null,
+      error_message: null,
+      retry_count: 0,
+      created_at: new Date("2026-07-09T00:01:00.000Z").toISOString(),
+      updated_at: new Date("2026-07-09T00:01:00.000Z").toISOString()
+    };
+
+    this.events.push(event);
+
+    return Promise.resolve({ event, claimed: true });
+  }
+
+  completeSettle(input: CompleteSettleBillingEventInput): Promise<BillingEventRecord> {
+    const event = this.events.find((item) => item.id === input.eventId);
+
+    if (event === undefined) {
+      return Promise.reject(new Error("结算事件不存在"));
+    }
+
+    if (event.status !== "settling" || event.retry_count !== input.expectedRetryCount) {
+      // 迟到 worker 持有旧版本时只读取当前事件，不能覆盖新 worker 的结算结果。
+      return Promise.resolve(event);
+    }
+
+    event.status = input.status;
+    event.error_code = input.errorCode;
+    event.error_message = input.errorMessage;
+
+    return Promise.resolve(event);
+  }
+
   findById(eventId: string): Promise<BillingEventRecord | undefined> {
     return Promise.resolve(this.events.find((event) => event.id === eventId));
   }
 
   findByIdempotencyKey(idempotencyKey: string): Promise<BillingEventRecord | undefined> {
     return Promise.resolve(this.events.find((event) => event.idempotency_key === idempotencyKey));
+  }
+}
+
+class FlakySettleGateway extends MockEntitlementReserveGateway {
+  private shouldFail = true;
+
+  allowSettle(): void {
+    this.shouldFail = false;
+  }
+
+  override settle(input: EntitlementSettleInput): Promise<EntitlementSettleResult> {
+    if (this.shouldFail) {
+      return Promise.reject(new Error("模拟结算失败"));
+    }
+
+    return super.settle(input);
   }
 }

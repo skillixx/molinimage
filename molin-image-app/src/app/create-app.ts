@@ -452,7 +452,8 @@ async function handleCreateImageTask(
     if (
       (taskType === "image_to_text" ||
         taskType === "image_to_image" ||
-        taskType === "image_restore") &&
+        taskType === "image_restore" ||
+        taskType === "upscale") &&
       fileService !== undefined
     ) {
       // 创建依赖输入图的任务前先校验归属，避免还没进 worker 就写入越权 file_id。
@@ -471,6 +472,7 @@ async function handleCreateImageTask(
       quality: readOptionalStringField(body, "quality"),
       imageSize: readOptionalStringField(body, "image_size"),
       imageCount: readOptionalNumberField(body, "image_count"),
+      upscaleFactor: readOptionalNumberField(body, "upscale_factor"),
       idempotencyKey:
         readHeader(request, "idempotency-key") ?? readOptionalStringField(body, "idempotency_key"),
       entitlementId
@@ -488,10 +490,11 @@ async function handleCreateImageTask(
     if (
       (taskType === "image_to_text" ||
         taskType === "image_to_image" ||
-        taskType === "image_restore") &&
+        taskType === "image_restore" ||
+        taskType === "upscale") &&
       imageGenerationWorkerService !== undefined
     ) {
-      // 图生文、图生图和图片修复复用进程内 worker，后续接 Redis 后只需投递 task_id。
+      // 依赖输入图的任务复用进程内 worker，后续接 Redis 后只需投递 task_id。
       const processedResult = await imageGenerationWorkerService.processTask(result.task.id);
 
       writeJson(
@@ -522,7 +525,8 @@ async function handleBillingEstimate(
       taskType: readStringField(body, "task_type"),
       imageCount: readOptionalNumberField(body, "image_count"),
       quality: readOptionalStringField(body, "quality"),
-      imageSize: readOptionalStringField(body, "image_size")
+      imageSize: readOptionalStringField(body, "image_size"),
+      upscaleFactor: readOptionalNumberField(body, "upscale_factor")
     });
 
     writeJson(response, 200, result);

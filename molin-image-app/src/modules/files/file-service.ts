@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { extname } from "node:path";
 
+import { imageSize } from "image-size";
+
 import type { AppConfig } from "../../config/app-config.js";
 import type {
   FileRecord,
@@ -14,6 +16,9 @@ export interface UploadFileRequest {
   mimeType: string;
   contentBase64: string;
   fileType?: string;
+  expectedWidth?: number;
+  expectedHeight?: number;
+  generatedAsset?: boolean;
 }
 
 export interface UploadFileResult {
@@ -67,6 +72,7 @@ export class FileServiceError extends Error {
 
 export class FileService {
   private readonly maxUploadBytes = 10 * 1024 * 1024;
+  private readonly maxGeneratedAssetBytes = 100 * 1024 * 1024;
   private readonly allowedMimeTypes = new Set([
     "image/png",
     "image/jpeg",
@@ -101,8 +107,27 @@ export class FileService {
       throw new FileServiceError("FILE_EMPTY", "文件内容不能为空。", 400);
     }
 
-    if (body.byteLength > this.maxUploadBytes) {
-      throw new FileServiceError("FILE_TOO_LARGE", "文件不能超过 10MB。", 413);
+    const maxFileBytes = request.generatedAsset ? this.maxGeneratedAssetBytes : this.maxUploadBytes;
+
+    if (body.byteLength > maxFileBytes) {
+      // 用户上传保持 10MB 限制，worker 生成的高清资产允许更大体积但仍设置硬上限。
+      const maxSizeLabel = request.generatedAsset ? "100MB" : "10MB";
+      throw new FileServiceError("FILE_TOO_LARGE", `文件不能超过 ${maxSizeLabel}。`, 413);
+    }
+
+    const dimensions = readImageDimensions(body);
+
+    if (
+      request.expectedWidth !== undefined &&
+      request.expectedHeight !== undefined &&
+      (dimensions?.width !== request.expectedWidth || dimensions.height !== request.expectedHeight)
+    ) {
+      // 高清放大结果必须以实际二进制尺寸验收，模型只返回图片但未真正放大时任务失败。
+      throw new FileServiceError(
+        "IMAGE_DIMENSIONS_MISMATCH",
+        `图片实际尺寸不是目标 ${String(request.expectedWidth)}x${String(request.expectedHeight)}。`,
+        502
+      );
     }
 
     const fileId = `file_${randomUUID().replaceAll("-", "")}`;
@@ -130,6 +155,9 @@ export class FileService {
       storage_bucket: storedObject.bucket,
       storage_key: storedObject.key,
       size_bytes: body.byteLength,
+      // 宽高来自实际图片二进制，不信任浏览器或 AI 网关声明的目标尺寸。
+      width: dimensions?.width ?? null,
+      height: dimensions?.height ?? null,
       checksum
     });
 
@@ -219,6 +247,29 @@ export class FileService {
     }
 
     return files;
+  }
+}
+
+function readImageDimensions(body: Buffer): { width: number; height: number } | undefined {
+  try {
+    const dimensions = imageSize(body);
+
+    if (
+      !Number.isInteger(dimensions.width) ||
+      !Number.isInteger(dimensions.height) ||
+      dimensions.width < 1 ||
+      dimensions.height < 1
+    ) {
+      return undefined;
+    }
+
+    return {
+      width: dimensions.width,
+      height: dimensions.height
+    };
+  } catch {
+    // 普通上传保持兼容；依赖尺寸的高清放大会在 worker 中明确拒绝无宽高图片。
+    return undefined;
   }
 }
 

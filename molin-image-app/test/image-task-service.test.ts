@@ -5,7 +5,9 @@ import type {
   ReleaseBillingRequest,
   ReleaseBillingResult,
   ReserveBillingRequest,
-  ReserveBillingResult
+  ReserveBillingResult,
+  SettleBillingRequest,
+  SettleBillingResult
 } from "../src/modules/billing/billing-service.js";
 import { BillingServiceError } from "../src/modules/billing/billing-service.js";
 import type {
@@ -71,6 +73,39 @@ void test("图片修复只接受四种修复类型且必须关联一张原图", 
   // 参数校验必须发生在计费预占之前，无效修复任务不能占用用户额度。
   assert.equal(billingService.reserveRequests.length, 0);
   assert.equal(repository.records.size, 0);
+});
+
+void test("高清放大只接受 2x 或 4x 且在预占前校验原图", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new FakeBillingService();
+  const service = new ImageTaskService(repository, billingService);
+
+  await assert.rejects(
+    () =>
+      service.createTask({
+        ownerUserId: 479,
+        taskType: "upscale",
+        upscaleFactor: 3,
+        inputFileIds: ["file_input_001"],
+        entitlementId: 62
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "UPSCALE_FACTOR_INVALID"
+  );
+  await assert.rejects(
+    () =>
+      service.createTask({
+        ownerUserId: 479,
+        taskType: "upscale",
+        upscaleFactor: 2,
+        inputFileIds: [],
+        entitlementId: 62
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "INPUT_IMAGE_REQUIRED"
+  );
+
+  assert.equal(billingService.reserveRequests.length, 0);
 });
 
 void test("接入计费服务后，创建图片任务会先预占积分并进入 billing_reserved", async () => {
@@ -357,6 +392,54 @@ void test("预占后的任务失败会释放积分，AI 网关失败不扣费", 
   );
 });
 
+void test("成功任务结算失败时保留结果并进入 billing_pending", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new FakeBillingService(false);
+  const service = new ImageTaskService(repository, billingService);
+  const created = await service.createTask({
+    ownerUserId: 479,
+    taskType: "upscale",
+    inputFileIds: ["file_input_001"],
+    upscaleFactor: 4,
+    imageCount: 1,
+    entitlementId: 62
+  });
+  await service.transitionTask({
+    ownerUserId: 479,
+    taskId: created.task.id,
+    toStatus: "queued"
+  });
+  await service.transitionTask({
+    ownerUserId: 479,
+    taskId: created.task.id,
+    toStatus: "running"
+  });
+
+  const completed = await service.transitionTask({
+    ownerUserId: 479,
+    taskId: created.task.id,
+    toStatus: "succeeded",
+    outputFileIds: ["file_output_001"]
+  });
+
+  assert.equal(completed.task.status, "billing_pending");
+  assert.deepEqual(completed.task.output_file_ids, ["file_output_001"]);
+  assert.equal(completed.task.error_code, "BILLING_SETTLE_PENDING");
+  assert.equal(completed.task.billing_event_id, "billing_event_001");
+  assert.equal(billingService.settleRequests[0]?.actualAmount, "8");
+
+  billingService.setSettleShouldSucceed(true);
+  const reconciled = await service.transitionTask({
+    ownerUserId: 479,
+    taskId: created.task.id,
+    toStatus: "succeeded",
+    outputFileIds: ["file_output_001"]
+  });
+
+  assert.equal(reconciled.task.status, "succeeded");
+  assert.equal(billingService.settleRequests[1]?.retryPending, true);
+});
+
 void test("用户不能查询或流转他人的图片任务", async () => {
   const repository = new InMemoryImageTasksRepository();
   const service = new ImageTaskService(repository);
@@ -489,6 +572,7 @@ class InMemoryImageTasksRepository implements ImageTasksRepository {
     const now = new Date("2026-07-09T00:00:00.000Z").toISOString();
     const record: ImageTaskRecord = {
       ...input,
+      upscale_factor: input.upscale_factor ?? null,
       output_file_ids: [],
       text_result: null,
       gateway_request_id: null,
@@ -618,18 +702,28 @@ class InMemoryImageTasksRepository implements ImageTasksRepository {
 class FakeBillingService {
   readonly reserveRequests: ReserveBillingRequest[] = [];
   readonly releaseRequests: ReleaseBillingRequest[] = [];
+  readonly settleRequests: SettleBillingRequest[] = [];
+
+  constructor(private settleShouldSucceed = true) {}
+
+  setSettleShouldSucceed(value: boolean): void {
+    this.settleShouldSucceed = value;
+  }
 
   reserve(request: ReserveBillingRequest): Promise<ReserveBillingResult> {
     this.reserveRequests.push(request);
+    const unitPoints = request.taskType === "upscale" && request.upscaleFactor === 4 ? 8 : 6;
+    const estimatedPoints = String((request.imageCount ?? 1) * unitPoints);
 
     return Promise.resolve({
       estimate: {
         task_type: request.taskType,
         usage_type: "image_text_to_image",
         unit: "credits",
-        unit_points: "6",
+        unit_points: String(unitPoints),
         quantity: request.imageCount ?? 1,
-        estimated_points: String((request.imageCount ?? 1) * 6),
+        estimated_points: estimatedPoints,
+        upscale_factor: request.upscaleFactor ?? null,
         balance_points: "100",
         enough_balance: true,
         rule_source: "env"
@@ -639,7 +733,7 @@ class FakeBillingService {
         owner_user_id: request.ownerUserId,
         task_id: request.taskId,
         event_type: "reserve",
-        amount_points: String((request.imageCount ?? 1) * 6),
+        amount_points: estimatedPoints,
         status: "reserved",
         idempotency_key: request.idempotencyKey,
         moling_reserve_id: "hold_001",
@@ -670,6 +764,27 @@ class FakeBillingService {
       }
     });
   }
+
+  settle(request: SettleBillingRequest): Promise<SettleBillingResult> {
+    this.settleRequests.push(request);
+
+    return Promise.resolve({
+      settled: this.settleShouldSucceed,
+      billing_event: {
+        id: "billing_settle_event_001",
+        owner_user_id: request.ownerUserId,
+        task_id: request.taskId,
+        event_type: "settle",
+        amount_points: request.actualAmount ?? "6",
+        status: this.settleShouldSucceed ? "settled" : "settle_pending",
+        idempotency_key: request.idempotencyKey,
+        moling_reserve_id: "hold_001",
+        moling_entitlement_id: 62,
+        created_at: "2026-07-09T00:00:00.000Z",
+        updated_at: "2026-07-09T00:00:00.000Z"
+      }
+    });
+  }
 }
 
 class InsufficientBillingService {
@@ -681,5 +796,9 @@ class InsufficientBillingService {
 
   release(): Promise<ReleaseBillingResult> {
     return Promise.reject(new Error("余额不足测试不需要释放预占"));
+  }
+
+  settle(): Promise<SettleBillingResult> {
+    return Promise.reject(new Error("余额不足测试不需要结算预占"));
   }
 }

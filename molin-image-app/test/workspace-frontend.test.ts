@@ -94,6 +94,14 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果�
   assert.match(html, /id="imageInput"/);
   assert.match(html, /id="editModeSelect"/);
   assert.match(html, /id="restoreTypeSelect"/);
+  assert.match(html, /data-mode="upscale"/);
+  assert.match(html, /id="upscaleFactorSelect"/);
+  assert.match(html, /value="2">2x/);
+  assert.match(html, /value="4">4x/);
+  // 高清放大保留模型选择，只隐藏不适用的尺寸与数量控件。
+  assert.match(html, /<span>模型<\/span>\s*<select id="modelSelect"><\/select>/);
+  assert.match(html, /id="sizeField">\s*<span>尺寸<\/span>/);
+  assert.match(html, /id="countField">\s*<span>数量<\/span>/);
   assert.match(html, /老照片修复/);
   assert.match(html, /去噪增强/);
   assert.match(html, /模糊变清晰/);
@@ -111,9 +119,15 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果�
   assert.match(workbench, /submitImageToImageTask/);
   assert.match(workbench, /submitImageRestoreTask/);
   assert.match(workbench, /task_type: "image_restore"/);
+  assert.match(workbench, /submitUpscaleTask/);
+  assert.match(workbench, /task_type: "upscale"/);
+  assert.match(workbench, /upscale_factor:/);
+  assert.match(workbench, /file\.file\.width/);
+  assert.match(workbench, /file\.file\.height/);
   assert.match(workbench, /confirmHighConsumptionTask/);
   assert.match(workbench, /图片修复属于高消耗任务/);
   assert.match(workbench, /gateway_capability: "image_edit"/);
+  assert.match(workbench, /model\.supported_task_types\.includes\(state\.mode\)/);
   assert.match(workbench, /useFileAsReference/);
   assert.match(workbench, /input_files/);
   assert.match(styles, /@media \(max-width: 900px\)/);

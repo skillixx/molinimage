@@ -40,8 +40,31 @@ export interface CreateReleaseBillingEventInput {
   error_message: string | null;
 }
 
+export interface ClaimSettleBillingEventInput {
+  id: string;
+  owner_user_id: number;
+  task_id: string;
+  amount_points: string;
+  idempotency_key: string;
+  moling_reserve_id: string | null;
+  moling_entitlement_id: number | null;
+  retry_pending: boolean;
+}
+
+export interface CompleteSettleBillingEventInput {
+  eventId: string;
+  expectedRetryCount: number;
+  status: "settled" | "settle_pending";
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
 export interface BillingEventsRepository {
   createReserved(input: CreateReservedBillingEventInput): Promise<BillingEventRecord>;
+  claimSettle(
+    input: ClaimSettleBillingEventInput
+  ): Promise<{ event: BillingEventRecord; claimed: boolean }>;
+  completeSettle(input: CompleteSettleBillingEventInput): Promise<BillingEventRecord>;
   createRelease(input: CreateReleaseBillingEventInput): Promise<BillingEventRecord>;
   findById(eventId: string): Promise<BillingEventRecord | undefined>;
   findByIdempotencyKey(idempotencyKey: string): Promise<BillingEventRecord | undefined>;
@@ -143,6 +166,94 @@ export class MySqlBillingEventsRepository implements BillingEventsRepository {
     }
 
     return createdEvent;
+  }
+
+  async claimSettle(
+    input: ClaimSettleBillingEventInput
+  ): Promise<{ event: BillingEventRecord; claimed: boolean }> {
+    try {
+      await this.pool.execute<ResultSetHeader>(
+        `INSERT INTO billing_events (
+          id,
+          owner_user_id,
+          task_id,
+          event_type,
+          amount_points,
+          status,
+          idempotency_key,
+          moling_reserve_id,
+          moling_entitlement_id,
+          error_code,
+          error_message
+        ) VALUES (?, ?, ?, 'settle', ?, 'settling', ?, ?, ?, NULL, NULL)`,
+        [
+          input.id,
+          input.owner_user_id,
+          input.task_id,
+          input.amount_points,
+          input.idempotency_key,
+          input.moling_reserve_id,
+          input.moling_entitlement_id
+        ]
+      );
+    } catch (error: unknown) {
+      const existingEvent = await this.findByIdempotencyKey(input.idempotency_key);
+
+      if (existingEvent !== undefined) {
+        if (
+          input.retry_pending &&
+          (existingEvent.status === "settle_pending" || existingEvent.status === "settling")
+        ) {
+          const [retryResult] = await this.pool.execute<ResultSetHeader>(
+            `UPDATE billing_events
+             SET status = 'settling', retry_count = retry_count + 1, error_code = NULL, error_message = NULL
+             WHERE id = ?
+               AND (
+                 status = 'settle_pending'
+                 OR (status = 'settling' AND updated_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 5 MINUTE))
+               )`,
+            [existingEvent.id]
+          );
+
+          const claimedEvent = await this.findById(existingEvent.id);
+
+          if (claimedEvent === undefined) {
+            throw new Error("结算事件重试抢占后回读失败", { cause: error });
+          }
+
+          // CAS 只允许一个对账 worker 接管 pending 或租约过期的 settling，避免进程退出后永久卡住。
+          return { event: claimedEvent, claimed: retryResult.affectedRows === 1 };
+        }
+
+        return { event: existingEvent, claimed: false };
+      }
+
+      throw error;
+    }
+
+    const createdEvent = await this.findByIdempotencyKey(input.idempotency_key);
+
+    if (createdEvent === undefined) {
+      throw new Error("结算计费事件写入后回读失败");
+    }
+
+    return { event: createdEvent, claimed: true };
+  }
+
+  async completeSettle(input: CompleteSettleBillingEventInput): Promise<BillingEventRecord> {
+    await this.pool.execute<ResultSetHeader>(
+      `UPDATE billing_events
+       SET status = ?, error_code = ?, error_message = ?
+       WHERE id = ? AND status = 'settling' AND retry_count = ?`,
+      [input.status, input.errorCode, input.errorMessage, input.eventId, input.expectedRetryCount]
+    );
+    const completedEvent = await this.findById(input.eventId);
+
+    if (completedEvent === undefined) {
+      throw new Error("结算事件完成后回读失败");
+    }
+
+    return completedEvent;
   }
 
   async findById(eventId: string): Promise<BillingEventRecord | undefined> {

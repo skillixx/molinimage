@@ -10,6 +10,7 @@ export interface BillingRule {
   usage_type: string;
   unit: string;
   points_per_unit: string;
+  upscale_factor: number | null;
   active: boolean;
 }
 
@@ -19,6 +20,7 @@ export interface EstimateBillingRequest {
   imageCount?: number;
   quality?: string;
   imageSize?: string;
+  upscaleFactor?: number;
 }
 
 export interface BillingEstimateResult {
@@ -28,6 +30,7 @@ export interface BillingEstimateResult {
   unit_points: string;
   quantity: number;
   estimated_points: string;
+  upscale_factor: number | null;
   balance_points: string;
   enough_balance: boolean;
   rule_source: "env";
@@ -58,6 +61,20 @@ export interface ReleaseBillingResult {
   released: boolean;
 }
 
+export interface SettleBillingRequest {
+  ownerUserId: number;
+  taskId: string;
+  reserveBillingEventId: string;
+  idempotencyKey: string;
+  actualAmount?: string;
+  retryPending?: boolean;
+}
+
+export interface SettleBillingResult {
+  billing_event: PublicBillingEvent;
+  settled: boolean;
+}
+
 export interface PublicBillingEvent {
   id: string;
   owner_user_id: number;
@@ -78,6 +95,10 @@ export interface EntitlementReserveGateway {
 
 export interface EntitlementReleaseGateway {
   release(input: EntitlementReleaseInput): Promise<EntitlementReleaseResult>;
+}
+
+export interface EntitlementSettleGateway {
+  settle(input: EntitlementSettleInput): Promise<EntitlementSettleResult>;
 }
 
 export interface EntitlementReserveInput {
@@ -101,6 +122,16 @@ export interface EntitlementReleaseResult {
   reserveId: string | null;
 }
 
+export interface EntitlementSettleInput {
+  reserveId: string;
+  actualAmount: string;
+  idempotencyKey: string;
+}
+
+export interface EntitlementSettleResult {
+  reserveId: string | null;
+}
+
 export class BillingServiceError extends Error {
   constructor(
     public readonly code: string,
@@ -118,13 +149,15 @@ export class BillingService {
   constructor(
     rulesJson: string,
     private readonly repository: BillingEventsRepository,
-    private readonly gateway: EntitlementReserveGateway & EntitlementReleaseGateway
+    private readonly gateway: EntitlementReserveGateway &
+      EntitlementReleaseGateway &
+      EntitlementSettleGateway
   ) {
     this.rules = parseBillingRules(rulesJson);
   }
 
   estimate(request: EstimateBillingRequest): BillingEstimateResult {
-    const rule = this.findActiveRule(request.taskType);
+    const rule = this.findActiveRule(request);
     const quantity = normalizeQuantity(request.imageCount);
     const estimatedPoints = multiplyDecimal(rule.points_per_unit, quantity);
     const balancePoints =
@@ -143,6 +176,7 @@ export class BillingService {
       unit_points: rule.points_per_unit,
       quantity,
       estimated_points: estimatedPoints,
+      upscale_factor: rule.upscale_factor,
       balance_points: balancePoints,
       enough_balance: compareDecimal(balancePoints, estimatedPoints) >= 0,
       rule_source: "env"
@@ -181,6 +215,92 @@ export class BillingService {
       },
       billing_event: toPublicBillingEvent(event)
     };
+  }
+
+  async settle(request: SettleBillingRequest): Promise<SettleBillingResult> {
+    const reserveEvent = await this.repository.findById(request.reserveBillingEventId);
+
+    if (reserveEvent?.event_type !== "reserve") {
+      throw new BillingServiceError(
+        "BILLING_RESERVE_EVENT_NOT_FOUND",
+        "未找到可结算的预占记录。",
+        409
+      );
+    }
+
+    if (
+      reserveEvent.owner_user_id !== request.ownerUserId ||
+      reserveEvent.task_id !== request.taskId
+    ) {
+      throw new BillingServiceError(
+        "BILLING_RESERVE_EVENT_FORBIDDEN",
+        "预占记录与当前任务不匹配。",
+        403
+      );
+    }
+
+    if (reserveEvent.moling_reserve_id === null) {
+      throw new BillingServiceError(
+        "BILLING_RESERVE_HOLD_MISSING",
+        "预占记录缺少 hold_id，无法结算。",
+        409
+      );
+    }
+
+    const actualAmount = request.actualAmount ?? reserveEvent.amount_points;
+    const claim = await this.repository.claimSettle({
+      id: `billing_${randomUUID().replaceAll("-", "")}`,
+      owner_user_id: request.ownerUserId,
+      task_id: request.taskId,
+      amount_points: actualAmount,
+      idempotency_key: request.idempotencyKey,
+      moling_reserve_id: reserveEvent.moling_reserve_id,
+      moling_entitlement_id: reserveEvent.moling_entitlement_id,
+      retry_pending: request.retryPending === true
+    });
+
+    if (!claim.claimed) {
+      // 并发 worker 未抢到结算执行权时复用现有状态，不能再次调用墨灵结算接口。
+      return {
+        billing_event: toPublicBillingEvent(claim.event),
+        settled: claim.event.status === "settled"
+      };
+    }
+
+    try {
+      await this.gateway.settle({
+        reserveId: reserveEvent.moling_reserve_id,
+        actualAmount,
+        idempotencyKey: request.idempotencyKey
+      });
+
+      const event = await this.repository.completeSettle({
+        eventId: claim.event.id,
+        expectedRetryCount: claim.event.retry_count,
+        status: "settled",
+        errorCode: null,
+        errorMessage: null
+      });
+
+      return {
+        billing_event: toPublicBillingEvent(event),
+        settled: event.status === "settled"
+      };
+    } catch (error: unknown) {
+      // 平台结算失败时保留待对账事件，任务不能直接暴露为成功。
+      const event = await this.repository.completeSettle({
+        eventId: claim.event.id,
+        expectedRetryCount: claim.event.retry_count,
+        status: "settle_pending",
+        errorCode: "BILLING_SETTLE_FAILED",
+        errorMessage: error instanceof Error ? error.message : "积分结算失败，等待对账。"
+      });
+
+      return {
+        billing_event: toPublicBillingEvent(event),
+        settled: event.status === "settled"
+      };
+    }
   }
 
   async release(request: ReleaseBillingRequest): Promise<ReleaseBillingResult> {
@@ -266,9 +386,15 @@ export class BillingService {
     }
   }
 
-  private findActiveRule(taskType: string): BillingRule {
-    const normalizedTaskType = taskType.trim();
-    const rule = this.rules.find((item) => item.task_type === normalizedTaskType && item.active);
+  private findActiveRule(request: EstimateBillingRequest): BillingRule {
+    const normalizedTaskType = request.taskType.trim();
+    const upscaleFactor = normalizeUpscaleFactor(normalizedTaskType, request.upscaleFactor);
+    const rule = this.rules.find(
+      (item) =>
+        item.task_type === normalizedTaskType &&
+        item.active &&
+        item.upscale_factor === upscaleFactor
+    );
 
     if (rule === undefined) {
       throw new BillingServiceError("BILLING_RULE_NOT_FOUND", "当前任务类型未配置计费规则。", 400);
@@ -294,14 +420,19 @@ export class BillingService {
 }
 
 export class MockEntitlementReserveGateway
-  implements EntitlementReserveGateway, EntitlementReleaseGateway
+  implements EntitlementReserveGateway, EntitlementReleaseGateway, EntitlementSettleGateway
 {
   private readonly releasedReserveIds = new Set<string>();
+  private settleCallCount = 0;
 
   constructor(private balancePoints: string) {}
 
   getBalancePoints(): string {
     return this.balancePoints;
+  }
+
+  getSettleCallCount(): number {
+    return this.settleCallCount;
   }
 
   reserve(input: EntitlementReserveInput): Promise<EntitlementReserveResult> {
@@ -331,6 +462,15 @@ export class MockEntitlementReserveGateway
       reserveId: input.reserveId
     });
   }
+
+  settle(input: EntitlementSettleInput): Promise<EntitlementSettleResult> {
+    // mock 在 reserve 时已经扣除余额，settle 只确认 hold，不重复扣减。
+    this.settleCallCount += 1;
+
+    return Promise.resolve({
+      reserveId: input.reserveId
+    });
+  }
 }
 
 function parseBillingRules(rulesJson: string): BillingRule[] {
@@ -350,9 +490,44 @@ function parseBillingRules(rulesJson: string): BillingRule[] {
       usage_type: readRuleString(item, "usage_type"),
       unit: readRuleString(item, "unit"),
       points_per_unit: normalizeDecimal(readRuleString(item, "points_per_unit")),
+      upscale_factor: parseRuleUpscaleFactor(item),
       active: item.active !== false
     };
   });
+}
+
+function parseRuleUpscaleFactor(source: Record<string, unknown>): number | null {
+  const value = source.upscale_factor;
+
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (value !== 2 && value !== 4) {
+    throw new BillingServiceError(
+      "BILLING_RULES_INVALID",
+      "高清放大计费规则 upscale_factor 只支持 2 或 4。",
+      500
+    );
+  }
+
+  return value;
+}
+
+function normalizeUpscaleFactor(taskType: string, value: number | undefined): number | null {
+  if (taskType !== "upscale") {
+    return null;
+  }
+
+  if (value !== 2 && value !== 4) {
+    throw new BillingServiceError(
+      "BILLING_UPSCALE_FACTOR_INVALID",
+      "高清放大倍率只支持 2x 或 4x。",
+      400
+    );
+  }
+
+  return value;
 }
 
 function readRuleString(source: Record<string, unknown>, key: string): string {

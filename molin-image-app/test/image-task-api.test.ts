@@ -287,6 +287,48 @@ void test("图片修复任务会校验原图归属、进入 worker 并保留原�
   }
 });
 
+void test("高清放大任务传递倍率并返回带宽高的结果文件", async () => {
+  const imageTaskService = new FakeImageTaskService();
+  const imageGenerationWorkerService = new FakeImageGenerationWorkerService();
+  const fileService = new FakeFileService();
+  const app = await startTestApp(imageTaskService, imageGenerationWorkerService, fileService);
+
+  try {
+    const cookie = await createSessionCookie(app.baseUrl);
+    const response = await fetch(`${app.baseUrl}/api/image/tasks`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie
+      },
+      body: JSON.stringify({
+        task_type: "upscale",
+        upscale_factor: 4,
+        input_file_ids: ["file_input_001"],
+        gateway_model_code: "image-edit-default",
+        gateway_capability: "image_edit",
+        image_count: 1
+      })
+    });
+    const body = (await response.json()) as ImageTaskResult & {
+      result_files: { file: { width: number | null; height: number | null } }[];
+    };
+
+    assert.equal(response.status, 201);
+    assert.deepEqual(fileService.assertOwnedRequests[0], {
+      ownerUserId: 479,
+      fileIds: ["file_input_001"]
+    });
+    assert.equal(imageTaskService.createRequests[0]?.taskType, "upscale");
+    assert.equal(imageTaskService.createRequests[0]?.upscaleFactor, 4);
+    assert.equal(imageGenerationWorkerService.taskIds[0], "task_api_001");
+    assert.equal(body.result_files[0]?.file.width, 480);
+    assert.equal(body.result_files[0]?.file.height, 320);
+  } finally {
+    await app.close();
+  }
+});
+
 void test("作品历史接口按当前 session 用户返回分页结果", async () => {
   const imageTaskService = new FakeImageTaskService();
   const app = await startTestApp(imageTaskService);
@@ -428,7 +470,11 @@ class FakeImageTaskService {
     this.createRequests.push(request);
 
     return Promise.resolve({
-      task: createTaskResult("task_api_001", request.ownerUserId, "billing_reserved")
+      task: {
+        ...createTaskResult("task_api_001", request.ownerUserId, "billing_reserved"),
+        task_type: request.taskType,
+        upscale_factor: request.upscaleFactor ?? null
+      }
     });
   }
 
@@ -567,8 +613,8 @@ class FakeFileService {
             storage_bucket: "molinimage",
             storage_key: isInput ? "uploads/479/input.png" : "generated/479/generated.png",
             size_bytes: 10,
-            width: null,
-            height: null,
+            width: isInput ? 120 : 480,
+            height: isInput ? 80 : 320,
             checksum: "checksum",
             created_at: "2026-07-09T00:00:00.000Z"
           },
@@ -683,6 +729,7 @@ function createTaskResult(
     quality: null,
     image_size: "1024x1024",
     image_count: 1,
+    upscale_factor: null,
     cost_points: null,
     billing_event_id: null,
     error_code: null,

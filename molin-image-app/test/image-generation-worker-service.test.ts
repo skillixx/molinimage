@@ -39,7 +39,8 @@ import { ImageGenerationWorkerService } from "../src/workers/image-generation-wo
 import type {
   ReleaseBillingRequest,
   ReleaseBillingResult,
-  ReserveBillingResult
+  ReserveBillingResult,
+  SettleBillingResult
 } from "../src/modules/billing/billing-service.js";
 
 void test("文生图 worker 调用 AI 网关、保存结果文件、写日志并把任务置为 succeeded", async () => {
@@ -305,6 +306,76 @@ void test("图片修复 worker 根据修复类型调用 image_edit 并保存关�
   assert.equal(aiLogs.records.at(-1)?.operation, "image_restore");
 });
 
+void test("高清放大 worker 按 4x 目标尺寸调用 image_edit 并记录结果宽高", async () => {
+  const taskRepository = new InMemoryImageTasksRepository();
+  const fileRepository = new InMemoryFilesRepository();
+  const storage = new FakeStorageService();
+  const aiGateway = new FakeAiGatewayImageGenerationClient();
+  const imageEdit = new FakeUpscaleImageEditClient();
+  const aiLogs = new InMemoryAiGatewayCallLogsRepository();
+  const fileService = new FileService(fileRepository, storage, {
+    storageProvider: "minio",
+    storageBucket: "molinimage",
+    storagePresignedUrlTtlSeconds: 300
+  });
+  const taskService = new ImageTaskService(taskRepository);
+  const worker = new ImageGenerationWorkerService(
+    taskRepository,
+    taskService,
+    fileService,
+    aiGateway,
+    aiLogs,
+    undefined,
+    imageEdit
+  );
+  const inputFile = await fileRepository.create({
+    id: "file_input_upscale_001",
+    owner_user_id: 479,
+    file_type: "input",
+    original_name: "small.png",
+    mime_type: "image/png",
+    storage_provider: "minio",
+    storage_bucket: "molinimage",
+    storage_key: "uploads/479/small.png",
+    size_bytes: 24,
+    width: 120,
+    height: 80,
+    checksum: "checksum"
+  });
+  const task = await taskRepository.create({
+    id: "task_upscale_001",
+    owner_user_id: 479,
+    task_type: "upscale",
+    status: "billing_reserved",
+    prompt: null,
+    negative_prompt: null,
+    style_preset_id: null,
+    input_file_ids: [inputFile.id],
+    gateway_model_code: "image-edit-default",
+    gateway_capability: "image_edit",
+    quality: null,
+    image_size: null,
+    image_count: 1,
+    upscale_factor: 4,
+    cost_points: "8",
+    billing_event_id: "billing_upscale_001",
+    idempotency_key: "task_create_upscale_001"
+  });
+
+  const result = await worker.processTask(task.id);
+  const outputFile = fileRepository.records.find((file) =>
+    result.task.output_file_ids.includes(file.id)
+  );
+
+  assert.equal(result.task.status, "succeeded");
+  assert.equal(imageEdit.inputs[0]?.size, "480x320");
+  assert.match(imageEdit.inputs[0]?.prompt ?? "", /4 倍/);
+  assert.ok(outputFile);
+  assert.equal(outputFile.width, 480);
+  assert.equal(outputFile.height, 320);
+  assert.equal(aiLogs.records.at(-1)?.operation, "upscale");
+});
+
 void test("图片修复网关失败时任务失败并释放预占积分", async () => {
   const taskRepository = new InMemoryImageTasksRepository();
   const fileRepository = new InMemoryFilesRepository();
@@ -430,6 +501,7 @@ class InMemoryImageTasksRepository implements ImageTasksRepository {
     const now = new Date("2026-07-09T00:00:00.000Z").toISOString();
     const record: ImageTaskRecord = {
       ...input,
+      upscale_factor: input.upscale_factor ?? null,
       output_file_ids: [],
       text_result: null,
       gateway_request_id: null,
@@ -515,8 +587,8 @@ class InMemoryFilesRepository implements FilesRepository {
   create(input: CreateFileRecordInput): Promise<FileRecord> {
     const record: FileRecord = {
       ...input,
-      width: null,
-      height: null,
+      width: input.width ?? null,
+      height: input.height ?? null,
       created_at: new Date("2026-07-09T00:00:00.000Z").toISOString()
     };
 
@@ -622,6 +694,26 @@ class FakeAiGatewayImageEditClient implements AiGatewayImageEditClient {
   }
 }
 
+class FakeUpscaleImageEditClient implements AiGatewayImageEditClient {
+  readonly inputs: EditImageInput[] = [];
+
+  editImage(input: EditImageInput): Promise<EditImageResult> {
+    this.inputs.push(input);
+    const [width, height] = input.size.split("x").map(Number);
+
+    return Promise.resolve({
+      request_id: "upscale_request_001",
+      images: [
+        {
+          mime_type: "image/png",
+          content_base64: createPngHeader(width, height).toString("base64")
+        }
+      ],
+      usage: { image_count: 1 }
+    });
+  }
+}
+
 class FailingAiGatewayImageEditClient implements AiGatewayImageEditClient {
   editImage(): Promise<EditImageResult> {
     return Promise.reject(new Error("图片修复模型调用失败。"));
@@ -673,4 +765,17 @@ class FakeBillingService {
       }
     });
   }
+
+  settle(): Promise<SettleBillingResult> {
+    return Promise.reject(new Error("失败 worker 测试不需要结算预占"));
+  }
+}
+
+function createPngHeader(width: number, height: number): Buffer {
+  const buffer = Buffer.alloc(24);
+  Buffer.from("89504e470d0a1a0a0000000d49484452", "hex").copy(buffer);
+  buffer.writeUInt32BE(width, 16);
+  buffer.writeUInt32BE(height, 20);
+
+  return buffer;
 }

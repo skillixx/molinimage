@@ -26,6 +26,8 @@ export interface CreateFileRecordInput {
   storage_bucket: string;
   storage_key: string;
   size_bytes: number;
+  width?: number | null;
+  height?: number | null;
   checksum: string;
 }
 
@@ -52,8 +54,10 @@ export class MySqlFilesRepository implements FilesRepository {
         storage_bucket,
         storage_key,
         size_bytes,
+        width,
+        height,
         checksum
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         input.id,
         input.owner_user_id,
@@ -64,6 +68,8 @@ export class MySqlFilesRepository implements FilesRepository {
         input.storage_bucket,
         input.storage_key,
         input.size_bytes,
+        input.width ?? null,
+        input.height ?? null,
         input.checksum
       ]
     );

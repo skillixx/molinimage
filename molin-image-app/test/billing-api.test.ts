@@ -76,19 +76,50 @@ void test("计费估算接口必须登录，并按当前用户估算积分", asy
   }
 });
 
+void test("高清放大计费接口把倍率传给价格规则", async () => {
+  const billingService = new FakeBillingService();
+  const app = await startTestApp(billingService);
+
+  try {
+    const cookie = await createSessionCookie(app.baseUrl);
+    const response = await fetch(`${app.baseUrl}/api/billing/estimate`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie
+      },
+      body: JSON.stringify({
+        task_type: "upscale",
+        image_count: 1,
+        upscale_factor: 4
+      })
+    });
+    const body = (await response.json()) as BillingEstimateResult;
+
+    assert.equal(response.status, 200);
+    assert.equal(billingService.requests[0]?.upscaleFactor, 4);
+    assert.equal(body.upscale_factor, 4);
+    assert.equal(body.estimated_points, "8");
+  } finally {
+    await app.close();
+  }
+});
+
 class FakeBillingService {
   readonly requests: EstimateBillingRequest[] = [];
 
   estimate(request: EstimateBillingRequest): BillingEstimateResult {
     this.requests.push(request);
+    const unitPoints = request.taskType === "upscale" ? (request.upscaleFactor === 4 ? 8 : 4) : 6;
 
     return {
       task_type: request.taskType,
-      usage_type: "image_text_to_image",
+      usage_type: request.taskType === "upscale" ? "image_upscale" : "image_text_to_image",
       unit: "credits",
-      unit_points: "6",
+      unit_points: String(unitPoints),
       quantity: request.imageCount ?? 1,
-      estimated_points: String((request.imageCount ?? 1) * 6),
+      estimated_points: String((request.imageCount ?? 1) * unitPoints),
+      upscale_factor: request.upscaleFactor ?? null,
       balance_points: "100",
       enough_balance: true,
       rule_source: "env"

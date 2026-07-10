@@ -27,6 +27,7 @@ export interface ImageTaskRecord {
   quality: string | null;
   image_size: string | null;
   image_count: number;
+  upscale_factor: number | null;
   cost_points: string | null;
   billing_event_id: string | null;
   idempotency_key: string;
@@ -52,6 +53,7 @@ export interface CreateImageTaskRecordInput {
   quality: string | null;
   image_size: string | null;
   image_count: number;
+  upscale_factor?: number | null;
   cost_points: string | null;
   billing_event_id: string | null;
   idempotency_key: string;
@@ -109,6 +111,7 @@ interface ImageTaskRow extends RowDataPacket {
   quality: string | null;
   image_size: string | null;
   image_count: number;
+  upscale_factor: number | null;
   cost_points: string | null;
   billing_event_id: string | null;
   idempotency_key: string;
@@ -141,10 +144,11 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
         quality,
         image_size,
         image_count,
+        upscale_factor,
         cost_points,
         billing_event_id,
         idempotency_key
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.id,
           input.owner_user_id,
@@ -160,6 +164,7 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
           input.quality,
           input.image_size,
           input.image_count,
+          input.upscale_factor ?? null,
           input.cost_points,
           input.billing_event_id,
           input.idempotency_key
@@ -253,6 +258,7 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
         quality,
         image_size,
         image_count,
+        upscale_factor,
         CAST(cost_points AS CHAR) AS cost_points,
         billing_event_id,
         idempotency_key,
@@ -420,6 +426,7 @@ const imageTaskSelectSql = `SELECT
   quality,
   image_size,
   image_count,
+  upscale_factor,
   CAST(cost_points AS CHAR) AS cost_points,
   billing_event_id,
   idempotency_key,

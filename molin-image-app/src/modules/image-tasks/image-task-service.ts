@@ -5,7 +5,11 @@ import type {
   ImageTasksRepository,
   ImageTaskStatus
 } from "../../infrastructure/database/image-tasks-repository.js";
-import type { BillingService, ReleaseBillingResult } from "../billing/billing-service.js";
+import type {
+  BillingService,
+  ReleaseBillingResult,
+  SettleBillingResult
+} from "../billing/billing-service.js";
 
 export type { ImageTaskStatus };
 
@@ -21,6 +25,7 @@ export interface CreateImageTaskRequest {
   quality?: string;
   imageSize?: string;
   imageCount?: number;
+  upscaleFactor?: number;
   idempotencyKey?: string;
   entitlementId?: number;
 }
@@ -79,6 +84,7 @@ export interface PublicImageTask {
   quality: string | null;
   image_size: string | null;
   image_count: number;
+  upscale_factor: number | null;
   cost_points: string | null;
   billing_event_id: string | null;
   error_code: string | null;
@@ -135,7 +141,7 @@ const allowedTransitions: ReadonlyMap<ImageTaskStatus, readonly ImageTaskStatus[
 export class ImageTaskService {
   constructor(
     private readonly repository: ImageTasksRepository,
-    private readonly billingService?: Pick<BillingService, "release" | "reserve">
+    private readonly billingService?: Pick<BillingService, "release" | "reserve" | "settle">
   ) {}
 
   async createTask(request: CreateImageTaskRequest): Promise<ImageTaskResult> {
@@ -169,6 +175,33 @@ export class ImageTaskService {
       }
     }
 
+    if (taskType === "upscale") {
+      if (inputFileIds.length !== 1) {
+        throw new ImageTaskServiceError(
+          "INPUT_IMAGE_REQUIRED",
+          "高清放大任务必须关联一张原图。",
+          400
+        );
+      }
+
+      if (request.upscaleFactor !== 2 && request.upscaleFactor !== 4) {
+        // 倍率在计费预占前校验，避免非法任务占用用户额度或进入 AI 网关。
+        throw new ImageTaskServiceError(
+          "UPSCALE_FACTOR_INVALID",
+          "高清放大倍率只支持 2x 或 4x。",
+          400
+        );
+      }
+
+      if (imageCount !== 1) {
+        throw new ImageTaskServiceError(
+          "UPSCALE_IMAGE_COUNT_INVALID",
+          "高清放大任务每次只能生成一张结果图。",
+          400
+        );
+      }
+    }
+
     const taskId = `task_${randomUUID().replaceAll("-", "")}`;
     const taskCreateIdempotencyKey =
       normalizeOptionalString(request.idempotencyKey) ?? `task_create_${randomUUID()}`;
@@ -197,6 +230,7 @@ export class ImageTaskService {
             imageCount,
             quality: request.quality,
             imageSize: request.imageSize,
+            upscaleFactor: request.upscaleFactor,
             entitlementId: request.entitlementId,
             idempotencyKey: reserveIdempotencyKey
           });
@@ -215,6 +249,7 @@ export class ImageTaskService {
       quality: normalizeOptionalString(request.quality),
       image_size: normalizeOptionalString(request.imageSize),
       image_count: imageCount,
+      upscale_factor: request.upscaleFactor ?? null,
       cost_points: reservedBilling?.estimate.estimated_points ?? null,
       billing_event_id: reservedBilling?.billing_event.id ?? null,
       idempotency_key: taskCreateIdempotencyKey
@@ -318,6 +353,7 @@ export class ImageTaskService {
       quality: sourceTask.quality ?? undefined,
       imageSize: sourceTask.image_size ?? undefined,
       imageCount: sourceTask.image_count,
+      upscaleFactor: sourceTask.upscale_factor ?? undefined,
       entitlementId,
       // 一个失败任务只生成一个稳定 retry task；重复点击重试按钮会返回同一个任务，防止重复扣费。
       idempotencyKey: `retry:${sourceTask.id}`
@@ -376,31 +412,41 @@ export class ImageTaskService {
 
     assertTransitionAllowed(currentTask.status, request.toStatus);
     assertFailureReason(request);
+    const settleResult =
+      request.toStatus === "succeeded"
+        ? await this.settleReservedBilling(currentTask, request)
+        : undefined;
     const releaseResult =
       request.toStatus === "failed"
         ? await this.releaseReservedBilling(currentTask, request)
         : undefined;
+    const persistedStatus = settleResult?.settled === false ? "billing_pending" : request.toStatus;
 
     const updatedTask = await this.repository.updateStatus({
       taskId: request.taskId,
       ownerUserId: request.ownerUserId,
       fromStatus: currentTask.status,
-      toStatus: request.toStatus,
+      toStatus: persistedStatus,
       outputFileIds:
         request.outputFileIds === undefined
           ? undefined
           : normalizeStringArray(request.outputFileIds, "output_file_ids"),
       textResult: normalizeOptionalString(request.textResult),
       gatewayRequestId: normalizeOptionalString(request.gatewayRequestId),
+      // 任务始终保留 reserve 事件 ID，待对账重试或最终释放都需要原 hold 关联。
       billingEventId: normalizeOptionalString(request.billingEventId),
       errorCode:
-        releaseResult?.released === false
-          ? "BILLING_RELEASE_PENDING"
-          : normalizeOptionalString(request.errorCode),
+        settleResult?.settled === false
+          ? "BILLING_SETTLE_PENDING"
+          : releaseResult?.released === false
+            ? "BILLING_RELEASE_PENDING"
+            : normalizeOptionalString(request.errorCode),
       errorMessage:
-        releaseResult?.released === false
-          ? "任务失败，积分释放等待对账。"
-          : normalizeOptionalString(request.errorMessage)
+        settleResult?.settled === false
+          ? "图片已生成，积分结算等待对账。"
+          : releaseResult?.released === false
+            ? "任务失败，积分释放等待对账。"
+            : normalizeOptionalString(request.errorMessage)
     });
 
     if (updatedTask === undefined) {
@@ -433,6 +479,25 @@ export class ImageTaskService {
       idempotencyKey: `${request.taskId}:${currentTask.task_type}:release`,
       reasonCode: normalizeOptionalString(request.errorCode) ?? "IMAGE_TASK_FAILED",
       reasonMessage: normalizeOptionalString(request.errorMessage) ?? "图片任务失败。"
+    });
+  }
+
+  private async settleReservedBilling(
+    currentTask: ImageTaskRecord,
+    request: TransitionImageTaskRequest
+  ): Promise<SettleBillingResult | undefined> {
+    if (this.billingService === undefined || currentTask.billing_event_id === null) {
+      return undefined;
+    }
+
+    // 成功任务必须先结算预占积分；失败时保留结果并进入 billing_pending 等待对账。
+    return await this.billingService.settle({
+      ownerUserId: request.ownerUserId,
+      taskId: request.taskId,
+      reserveBillingEventId: currentTask.billing_event_id,
+      idempotencyKey: `${request.taskId}:${currentTask.task_type}:settle`,
+      actualAmount: currentTask.cost_points ?? undefined,
+      retryPending: currentTask.status === "billing_pending"
     });
   }
 }
@@ -547,6 +612,7 @@ function toPublicImageTask(task: ImageTaskRecord): PublicImageTask {
     quality: task.quality,
     image_size: task.image_size,
     image_count: task.image_count,
+    upscale_factor: task.upscale_factor,
     cost_points: task.cost_points,
     billing_event_id: task.billing_event_id,
     error_code: task.error_code,

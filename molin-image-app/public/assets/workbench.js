@@ -38,6 +38,13 @@ const modeConfig = {
     capability: "image_edit",
     placeholder: "描述修复目标，例如去噪、增强清晰度、色彩修复",
     requiresUpload: true
+  },
+  upscale: {
+    title: "高清放大",
+    eyebrow: "IMAGE UPSCALE",
+    capability: "image_edit",
+    placeholder: "高清放大将保持原图内容并增强细节",
+    requiresUpload: true
   }
 };
 
@@ -57,6 +64,7 @@ const elements = {
   modeTabs: Array.from(document.querySelectorAll(".mode-tab")),
   modeEyebrow: document.querySelector("#modeEyebrow"),
   modeTitle: document.querySelector("#modeTitle"),
+  promptField: document.querySelector("#promptField"),
   promptInput: document.querySelector("#promptInput"),
   imageUploadField: document.querySelector("#imageUploadField"),
   imageInput: document.querySelector("#imageInput"),
@@ -65,8 +73,12 @@ const elements = {
   editModeSelect: document.querySelector("#editModeSelect"),
   restoreTypeField: document.querySelector("#restoreTypeField"),
   restoreTypeSelect: document.querySelector("#restoreTypeSelect"),
+  upscaleFactorField: document.querySelector("#upscaleFactorField"),
+  upscaleFactorSelect: document.querySelector("#upscaleFactorSelect"),
   modelSelect: document.querySelector("#modelSelect"),
+  sizeField: document.querySelector("#sizeField"),
   sizeSelect: document.querySelector("#sizeSelect"),
+  countField: document.querySelector("#countField"),
   countSelect: document.querySelector("#countSelect"),
   estimateStrip: document.querySelector("#estimateStrip"),
   estimatePoints: document.querySelector("#estimatePoints"),
@@ -86,6 +98,9 @@ elements.sizeSelect.addEventListener("change", () => {
   void refreshEstimate();
 });
 elements.countSelect.addEventListener("change", () => {
+  void refreshEstimate();
+});
+elements.upscaleFactorSelect.addEventListener("change", () => {
   void refreshEstimate();
 });
 elements.primaryAction.addEventListener("click", () => {
@@ -155,13 +170,17 @@ function renderMode() {
   elements.modeTitle.textContent = config.title;
   elements.promptInput.placeholder = config.placeholder;
   elements.imageUploadField.hidden = !config.requiresUpload;
+  elements.promptField.hidden = state.mode === "upscale";
   elements.editModeField.hidden = state.mode !== "image_to_image";
   elements.restoreTypeField.hidden = state.mode !== "image_restore";
+  elements.upscaleFactorField.hidden = state.mode !== "upscale";
+  elements.sizeField.hidden = state.mode === "upscale";
+  elements.countField.hidden = state.mode === "upscale";
   elements.sizeSelect.disabled = state.mode === "image_to_text";
   elements.countSelect.disabled = state.mode === "image_to_text";
   renderUploadHint();
 
-  if (state.mode === "image_to_text") {
+  if (state.mode === "image_to_text" || state.mode === "upscale") {
     elements.countSelect.value = "1";
   }
 
@@ -188,7 +207,12 @@ async function refreshEstimate() {
     const estimate = await estimateBilling({
       task_type: state.mode,
       image_count: state.mode === "image_to_text" ? 1 : Number(elements.countSelect.value),
-      image_size: state.mode === "image_to_text" ? undefined : elements.sizeSelect.value
+      image_size:
+        state.mode === "image_to_text" || state.mode === "upscale"
+          ? undefined
+          : elements.sizeSelect.value,
+      upscale_factor:
+        state.mode === "upscale" ? Number(elements.upscaleFactorSelect.value) : undefined
     });
 
     state.estimate = estimate;
@@ -225,6 +249,11 @@ async function submitCurrentTask() {
 
   if (state.mode === "image_restore") {
     await submitImageRestoreTask();
+    return;
+  }
+
+  if (state.mode === "upscale") {
+    await submitUpscaleTask();
     return;
   }
 
@@ -404,7 +433,7 @@ async function submitImageRestoreTask() {
     return;
   }
 
-  if (!confirmHighConsumptionTask()) {
+  if (!confirmHighConsumptionTask("图片修复")) {
     elements.actionHint.textContent = "已取消图片修复，本次不会预占积分";
     return;
   }
@@ -444,13 +473,71 @@ async function submitImageRestoreTask() {
   }
 }
 
-function confirmHighConsumptionTask() {
+async function submitUpscaleTask() {
+  clearError();
+
+  const modelCode = elements.modelSelect.value;
+  const file = elements.imageInput.files?.[0];
+  const upscaleFactor = Number(elements.upscaleFactorSelect.value);
+
+  if (modelCode.length === 0) {
+    showError("当前模式暂无可用模型。");
+    return;
+  }
+
+  if (file === undefined) {
+    showError("请先上传一张需要放大的原图。");
+    return;
+  }
+
+  if (!confirmHighConsumptionTask(`高清放大 ${String(upscaleFactor)}x`)) {
+    elements.actionHint.textContent = "已取消高清放大，本次不会预占积分";
+    return;
+  }
+
+  setSubmitting(true, "正在上传原图并调用高清放大模型");
+  renderProgress("uploading");
+
+  try {
+    const uploaded = await uploadImageFile({
+      file_name: file.name,
+      mime_type: file.type,
+      content_base64: await readFileAsBase64(file),
+      file_type: "input"
+    });
+
+    renderProgress("generating");
+    const result = await createImageTask({
+      task_type: "upscale",
+      upscale_factor: upscaleFactor,
+      input_file_ids: [uploaded.file.id],
+      gateway_model_code: modelCode,
+      gateway_capability: "image_edit",
+      image_count: 1
+    });
+
+    renderTaskResult(result);
+    renderProgress(result.task.status === "failed" ? "failed" : "completed");
+    elements.actionHint.textContent = `放大任务 ${result.task.id} 已完成`;
+    await Promise.all([refreshEstimate(), refreshHistory()]);
+  } catch (error) {
+    renderProgress("failed");
+    showError(error instanceof Error ? error.message : "高清放大任务提交失败。");
+  } finally {
+    setSubmitting(false);
+  }
+}
+
+function confirmHighConsumptionTask(operationLabel) {
   const estimatedPoints = state.estimate?.estimated_points ?? "--";
   const outputCount = elements.countSelect.value;
 
-  // 图片修复统一视为高消耗操作，在上传原图和预占积分之前要求用户明确确认。
+  // 图片修复和高清放大属于高消耗操作，在上传原图和预占积分之前要求用户明确确认。
+  const confirmationLabel =
+    operationLabel === "图片修复" ? "图片修复属于高消耗任务" : `${operationLabel}属于高消耗任务`;
+
   return window.confirm(
-    `图片修复属于高消耗任务，预计消耗 ${estimatedPoints} 积分并生成 ${outputCount} 张结果。确认继续吗？`
+    `${confirmationLabel}，预计消耗 ${estimatedPoints} 积分并生成 ${outputCount} 张结果。确认继续吗？`
   );
 }
 
@@ -522,6 +609,7 @@ function createImageResultCard(file) {
   const actions = document.createElement("div");
   const downloadLink = document.createElement("a");
   const continueButton = document.createElement("button");
+  const dimensions = document.createElement("small");
 
   item.className = "result-item";
   image.alt = "生成结果";
@@ -538,7 +626,13 @@ function createImageResultCard(file) {
     useFileAsReference(file.file.id);
   });
 
-  actions.append(downloadLink, continueButton);
+  dimensions.className = "result-dimensions";
+  dimensions.textContent =
+    file.file.width !== null && file.file.height !== null
+      ? `${String(file.file.width)} x ${String(file.file.height)}`
+      : "尺寸未知";
+
+  actions.append(dimensions, downloadLink, continueButton);
   item.append(image, actions);
 
   return item;
@@ -598,7 +692,8 @@ function resolveProgressSteps() {
   if (
     state.mode === "image_to_text" ||
     state.mode === "image_to_image" ||
-    state.mode === "image_restore"
+    state.mode === "image_restore" ||
+    state.mode === "upscale"
   ) {
     return [
       { id: "upload", label: "上传图片" },
@@ -610,7 +705,9 @@ function resolveProgressSteps() {
             ? "生成文本"
             : state.mode === "image_restore"
               ? "修复图片"
-              : "编辑图片"
+              : state.mode === "upscale"
+                ? "高清放大"
+                : "编辑图片"
       },
       {
         id: "result",
@@ -705,7 +802,9 @@ function updatePrimaryActionState() {
         ? "上传参考图后将按编辑模式生成新图"
         : state.mode === "image_restore"
           ? "图片修复属于高消耗任务，提交前需要二次确认"
-          : "提交后将预占积分并生成图片";
+          : state.mode === "upscale"
+            ? "高清放大价格随倍率变化，提交前需要二次确认"
+            : "提交后将预占积分并生成图片";
 }
 
 function createTextResultCard(text) {
@@ -729,7 +828,12 @@ function createTextResultCard(text) {
 
 function renderModelOptions() {
   const config = modeConfig[state.mode];
-  const models = state.models.filter((model) => model.capability === config.capability);
+  const models = state.models.filter(
+    (model) =>
+      model.capability === config.capability &&
+      Array.isArray(model.supported_task_types) &&
+      model.supported_task_types.includes(state.mode)
+  );
 
   elements.modelSelect.replaceChildren();
 

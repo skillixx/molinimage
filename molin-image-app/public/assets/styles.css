@@ -170,7 +170,7 @@ textarea {
 
 .mode-tabs {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -442,6 +442,12 @@ textarea {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+}
+
+.result-dimensions {
+  margin-right: auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .result-item a {
