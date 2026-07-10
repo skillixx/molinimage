@@ -2,30 +2,71 @@ import "dotenv/config";
 
 import { createServer } from "node:http";
 
+import { createAppRequestHandler } from "./create-app.js";
 import { ConfigError, loadAppConfig } from "../config/app-config.js";
-import { createHealthResponse } from "../modules/health/health.service.js";
+import {
+  EnvAiGatewayModelCatalogClient,
+  HttpAiGatewayImageEditClient,
+  HttpAiGatewayImageGenerationClient,
+  HttpAiGatewayVisionTextClient
+} from "../infrastructure/ai/ai-gateway-client.js";
+import { MySqlAiGatewayCallLogsRepository } from "../infrastructure/database/ai-gateway-call-logs-repository.js";
+import { MySqlBillingEventsRepository } from "../infrastructure/database/billing-events-repository.js";
+import { createDatabasePool } from "../infrastructure/database/database-pool.js";
+import { MySqlFilesRepository } from "../infrastructure/database/files-repository.js";
+import { MySqlImageTasksRepository } from "../infrastructure/database/image-tasks-repository.js";
+import { MolingClient } from "../infrastructure/moling/moling-client.js";
+import { MinioStorageService } from "../infrastructure/storage/minio-storage-service.js";
+import { BillingService } from "../modules/billing/billing-service.js";
+import { FileService } from "../modules/files/file-service.js";
+import { ImageModelService } from "../modules/image-models/image-model-service.js";
+import { ImageTaskService } from "../modules/image-tasks/image-task-service.js";
+import { ImageGenerationWorkerService } from "../workers/image-generation-worker-service.js";
 
 const config = loadConfigOrExit();
+const molingClient = new MolingClient(config);
+const databasePool = createDatabasePool(config);
+const filesRepository = new MySqlFilesRepository(databasePool);
+const imageTasksRepository = new MySqlImageTasksRepository(databasePool);
+const billingEventsRepository = new MySqlBillingEventsRepository(databasePool);
+const aiGatewayCallLogsRepository = new MySqlAiGatewayCallLogsRepository(databasePool);
+const storageService = new MinioStorageService(config);
+const fileService = new FileService(filesRepository, storageService, config);
+const billingService = new BillingService(
+  config.billingRulesJson,
+  billingEventsRepository,
+  molingClient
+);
+const imageTaskService = new ImageTaskService(imageTasksRepository, billingService);
+const modelCatalogClient = new EnvAiGatewayModelCatalogClient(config.imageModelCatalogJson);
+const imageGenerationClient = new HttpAiGatewayImageGenerationClient(config);
+const imageEditClient = new HttpAiGatewayImageEditClient(config);
+const visionTextClient = new HttpAiGatewayVisionTextClient(config);
+const imageModelService = new ImageModelService(
+  modelCatalogClient,
+  config.imageModelEnabledCapabilities,
+  config.imageModelRequiredCapabilities
+);
+const imageGenerationWorkerService = new ImageGenerationWorkerService(
+  imageTasksRepository,
+  imageTaskService,
+  fileService,
+  imageGenerationClient,
+  aiGatewayCallLogsRepository,
+  visionTextClient,
+  imageEditClient
+);
 
-const server = createServer((request, response) => {
-  // API 服务只负责 HTTP 入口和请求分发，具体业务逻辑放到 modules 内，避免入口文件变成大杂烩。
-  if (request.method === "GET" && request.url === "/health") {
-    const body = JSON.stringify(createHealthResponse());
-
-    response.writeHead(200, {
-      "content-type": "application/json; charset=utf-8",
-      "content-length": Buffer.byteLength(body)
-    });
-    response.end(body);
-    return;
-  }
-
-  // 当前阶段只提供健康检查，后续 Goal 再逐步接入鉴权、任务和计费 API。
-  response.writeHead(404, {
-    "content-type": "application/json; charset=utf-8"
-  });
-  response.end(JSON.stringify({ error: "NOT_FOUND" }));
-});
+const server = createServer(
+  createAppRequestHandler(config, {
+    launchTicketVerifier: molingClient,
+    fileService,
+    imageModelService,
+    imageTaskService,
+    billingService,
+    imageGenerationWorkerService
+  })
+);
 
 server.listen(config.port, () => {
   // 启动日志不输出任何敏感配置，后续接入墨灵 ticket 和 AI 网关时也保持同样约束。

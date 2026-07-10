@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.playwright-cli/
 .env
 .env.local
 .env.*.local
