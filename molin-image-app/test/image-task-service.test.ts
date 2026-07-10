@@ -17,6 +17,7 @@ import type {
   TransitionImageTaskInput
 } from "../src/infrastructure/database/image-tasks-repository.js";
 import {
+  type ImageTaskAuditEvent,
   ImageTaskService,
   ImageTaskServiceError
 } from "../src/modules/image-tasks/image-task-service.js";
@@ -106,6 +107,154 @@ void test("高清放大只接受 2x 或 4x 且在预占前校验原图", async (
   );
 
   assert.equal(billingService.reserveRequests.length, 0);
+});
+
+void test("再次编辑任务必须引用本人成功任务的结果文件并记录来源", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const service = new ImageTaskService(repository);
+  const source = await service.createTask({
+    ownerUserId: 479,
+    taskType: "text_to_image",
+    prompt: "清晨咖啡产品图",
+    gatewayModelCode: "image-gen-default",
+    gatewayCapability: "image_generation",
+    imageSize: "1024x1024",
+    imageCount: 1
+  });
+  await service.transitionTask({ ownerUserId: 479, taskId: source.task.id, toStatus: "queued" });
+  await service.transitionTask({ ownerUserId: 479, taskId: source.task.id, toStatus: "running" });
+  await service.transitionTask({
+    ownerUserId: 479,
+    taskId: source.task.id,
+    toStatus: "succeeded",
+    outputFileIds: ["file_source_result_001"]
+  });
+
+  const reedit = await service.createTask({
+    ownerUserId: 479,
+    taskType: "image_to_image",
+    prompt: "改成黄昏背景",
+    stylePresetId: "change_background",
+    inputFileIds: ["file_source_result_001"],
+    sourceTaskId: source.task.id,
+    entitlementId: 62,
+    idempotencyKey: "reedit:source:001"
+  });
+
+  assert.equal(reedit.task.source_task_id, source.task.id);
+  assert.deepEqual(reedit.task.input_file_ids, ["file_source_result_001"]);
+  await assert.rejects(
+    () =>
+      service.createTask({
+        ownerUserId: 479,
+        taskType: "image_to_image",
+        inputFileIds: ["file_not_from_source"],
+        sourceTaskId: source.task.id
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "SOURCE_TASK_FILE_MISMATCH"
+  );
+
+  const sourceRecord = repository.records.get(source.task.id);
+
+  assert.ok(sourceRecord);
+  const billingService = new FakeBillingService();
+  const auditLogger = new FakeImageTaskAuditLogger();
+  const billedService = new ImageTaskService(repository, billingService, auditLogger);
+  sourceRecord.owner_user_id = 480;
+  await assert.rejects(
+    () =>
+      billedService.createTask({
+        ownerUserId: 479,
+        taskType: "image_to_image",
+        inputFileIds: ["file_source_result_001"],
+        sourceTaskId: source.task.id
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "SOURCE_TASK_FORBIDDEN"
+  );
+  assert.deepEqual(auditLogger.events[0], {
+    event_type: "source_task_access_denied",
+    actor_user_id: 479,
+    source_task_id: source.task.id,
+    reason: "owner_mismatch"
+  });
+
+  sourceRecord.owner_user_id = 479;
+  sourceRecord.status = "running";
+  await assert.rejects(
+    () =>
+      billedService.createTask({
+        ownerUserId: 479,
+        taskType: "image_to_image",
+        inputFileIds: ["file_source_result_001"],
+        sourceTaskId: source.task.id,
+        entitlementId: 62
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "SOURCE_TASK_NOT_AVAILABLE"
+  );
+
+  sourceRecord.status = "succeeded";
+  sourceRecord.deleted_at = "2026-07-10T00:00:00.000Z";
+  await assert.rejects(
+    () =>
+      billedService.createTask({
+        ownerUserId: 479,
+        taskType: "image_to_image",
+        inputFileIds: ["file_source_result_001"],
+        sourceTaskId: source.task.id,
+        entitlementId: 62
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "SOURCE_TASK_NOT_AVAILABLE"
+  );
+
+  // 无效来源必须在计费预占前被拒绝，不能占用用户积分。
+  assert.equal(billingService.reserveRequests.length, 0);
+
+  const idempotentReplay = await billedService.createTask({
+    ownerUserId: 479,
+    taskType: "image_to_image",
+    prompt: "改成黄昏背景",
+    stylePresetId: "change_background",
+    inputFileIds: ["file_source_result_001"],
+    sourceTaskId: source.task.id,
+    entitlementId: 62,
+    idempotencyKey: "reedit:source:001"
+  });
+
+  assert.equal(idempotentReplay.task.id, reedit.task.id);
+  assert.equal(billingService.reserveRequests.length, 0);
+  await assert.rejects(
+    () =>
+      billedService.createTask({
+        ownerUserId: 479,
+        taskType: "image_to_image",
+        prompt: "使用冲突参数",
+        stylePresetId: "change_background",
+        inputFileIds: ["file_source_result_001"],
+        sourceTaskId: source.task.id,
+        idempotencyKey: "reedit:source:001"
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "IMAGE_TASK_IDEMPOTENCY_CONFLICT"
+  );
+  await assert.rejects(
+    () =>
+      billedService.createTask({
+        ownerUserId: 479,
+        taskType: "image_to_image",
+        prompt: "改成黄昏背景",
+        stylePresetId: "change_background",
+        inputFileIds: ["file_source_result_001"],
+        sourceTaskId: source.task.id,
+        entitlementId: 63,
+        idempotencyKey: "reedit:source:001"
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "IMAGE_TASK_IDEMPOTENCY_CONFLICT"
+  );
 });
 
 void test("接入计费服务后，创建图片任务会先预占积分并进入 billing_reserved", async () => {
@@ -572,6 +721,8 @@ class InMemoryImageTasksRepository implements ImageTasksRepository {
     const now = new Date("2026-07-09T00:00:00.000Z").toISOString();
     const record: ImageTaskRecord = {
       ...input,
+      source_task_id: input.source_task_id ?? null,
+      entitlement_id: input.entitlement_id ?? null,
       upscale_factor: input.upscale_factor ?? null,
       output_file_ids: [],
       text_result: null,
@@ -784,6 +935,14 @@ class FakeBillingService {
         updated_at: "2026-07-09T00:00:00.000Z"
       }
     });
+  }
+}
+
+class FakeImageTaskAuditLogger {
+  readonly events: ImageTaskAuditEvent[] = [];
+
+  record(event: ImageTaskAuditEvent): void {
+    this.events.push(event);
   }
 }
 

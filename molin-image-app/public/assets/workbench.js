@@ -53,7 +53,9 @@ const state = {
   models: [],
   estimate: null,
   isSubmitting: false,
-  referenceFileId: null
+  referenceFileId: null,
+  referencePreviewUrl: null,
+  sourceTaskId: null
 };
 
 const elements = {
@@ -69,6 +71,8 @@ const elements = {
   imageUploadField: document.querySelector("#imageUploadField"),
   imageInput: document.querySelector("#imageInput"),
   uploadHint: document.querySelector("#uploadHint"),
+  referencePreview: document.querySelector("#referencePreview"),
+  referencePreviewImage: document.querySelector("#referencePreviewImage"),
   editModeField: document.querySelector("#editModeField"),
   editModeSelect: document.querySelector("#editModeSelect"),
   restoreTypeField: document.querySelector("#restoreTypeField"),
@@ -107,8 +111,8 @@ elements.primaryAction.addEventListener("click", () => {
   void submitCurrentTask();
 });
 elements.imageInput.addEventListener("change", () => {
-  // 用户重新选择本地图片时，清掉“继续编辑”带来的历史文件引用，避免一次提交混用两个输入来源。
-  state.referenceFileId = null;
+  // 用户重新选择本地图片时，清掉“再次编辑”带来的历史关系，避免一次提交混用两个输入来源。
+  clearReeditSource();
   renderUploadHint();
 });
 
@@ -121,7 +125,7 @@ for (const tab of elements.modeTabs) {
     }
 
     state.mode = nextMode;
-    state.referenceFileId = null;
+    clearReeditSource();
     elements.imageInput.value = "";
     elements.resultList.replaceChildren();
     renderMode();
@@ -367,7 +371,7 @@ async function submitImageToImageTask() {
   }
 
   if (file === undefined && state.referenceFileId === null) {
-    showError("请先上传一张参考图，或从生成结果中选择继续编辑。");
+    showError("请先上传一张参考图，或从历史结果中选择再次编辑。");
     return;
   }
 
@@ -402,7 +406,8 @@ async function submitImageToImageTask() {
       gateway_model_code: modelCode,
       gateway_capability: "image_edit",
       image_size: elements.sizeSelect.value,
-      image_count: Number(elements.countSelect.value)
+      image_count: Number(elements.countSelect.value),
+      source_task_id: state.sourceTaskId
     });
 
     renderTaskResult(result);
@@ -577,7 +582,7 @@ function renderTaskResult(result) {
   }
 
   for (const file of files) {
-    elements.resultList.append(createImageResultCard(file));
+    elements.resultList.append(createImageResultCard(file, result.task));
   }
 }
 
@@ -603,7 +608,7 @@ function createInputReferenceCard(files) {
   return item;
 }
 
-function createImageResultCard(file) {
+function createImageResultCard(file, task) {
   const item = document.createElement("article");
   const image = document.createElement("img");
   const actions = document.createElement("div");
@@ -621,9 +626,9 @@ function createImageResultCard(file) {
   downloadLink.textContent = "下载";
   continueButton.type = "button";
   continueButton.className = "ghost-button copy-button";
-  continueButton.textContent = "继续编辑";
+  continueButton.textContent = "再次编辑";
   continueButton.addEventListener("click", () => {
-    useFileAsReference(file.file.id);
+    useTaskForReedit(task, file);
   });
 
   dimensions.className = "result-dimensions";
@@ -632,7 +637,11 @@ function createImageResultCard(file) {
       ? `${String(file.file.width)} x ${String(file.file.height)}`
       : "尺寸未知";
 
-  actions.append(dimensions, downloadLink, continueButton);
+  actions.append(dimensions, downloadLink);
+
+  if (task.status === "succeeded") {
+    actions.append(continueButton);
+  }
   item.append(image, actions);
 
   return item;
@@ -926,33 +935,30 @@ function renderHistory(items) {
       const imageGrid = document.createElement("div");
       imageGrid.className = "history-image-grid";
 
-      for (const file of files.slice(0, 4)) {
+      for (const file of files) {
+        const imageItem = document.createElement("div");
         const link = document.createElement("a");
         const image = document.createElement("img");
+        const reeditButton = document.createElement("button");
 
+        imageItem.className = "history-image-item";
         link.href = file.download_url;
         link.target = "_blank";
         link.rel = "noreferrer";
         image.alt = "历史图片结果";
         image.src = file.preview_url;
         link.append(image);
-        imageGrid.append(link);
+        reeditButton.type = "button";
+        reeditButton.className = "ghost-button history-reedit-button";
+        reeditButton.textContent = "再次编辑";
+        reeditButton.addEventListener("click", () => {
+          useTaskForReedit(task, file);
+        });
+        imageItem.append(link, reeditButton);
+        imageGrid.append(imageItem);
       }
 
       item.append(imageGrid);
-
-      const continueButton = document.createElement("button");
-      continueButton.type = "button";
-      continueButton.className = "ghost-button copy-button";
-      continueButton.textContent = "继续编辑";
-      continueButton.addEventListener("click", () => {
-        const firstFileId = files[0]?.file?.id;
-
-        if (firstFileId !== undefined) {
-          useFileAsReference(firstFileId);
-        }
-      });
-      actions.append(continueButton);
     }
 
     if (task.text_result !== null && task.text_result.length > 0) {
@@ -1038,24 +1044,57 @@ function setModelHealth(text, tone) {
 
 function renderUploadHint() {
   if (state.referenceFileId !== null && state.mode === "image_to_image") {
-    elements.uploadHint.textContent = `已选择生成结果作为参考图：${state.referenceFileId}`;
+    elements.uploadHint.textContent = `已从任务 ${state.sourceTaskId ?? "未知"} 自动带入结果图。`;
+    elements.referencePreview.hidden = false;
+    elements.referencePreviewImage.src = state.referencePreviewUrl ?? "";
     return;
   }
 
   elements.uploadHint.textContent = "支持 png、jpeg、webp、gif，最大 10MB。";
+  elements.referencePreview.hidden = true;
+  elements.referencePreviewImage.removeAttribute("src");
 }
 
-function useFileAsReference(fileId) {
+function useTaskForReedit(task, file) {
   state.mode = "image_to_image";
-  state.referenceFileId = fileId;
+  state.referenceFileId = file.file.id;
+  state.referencePreviewUrl = file.preview_url;
+  state.sourceTaskId = task.id;
   elements.imageInput.value = "";
   elements.resultList.replaceChildren();
+  elements.promptInput.value = task.prompt ?? "";
   renderMode();
   renderModelOptions();
+  elements.editModeSelect.value = "keep_subject";
+  elements.sizeSelect.value = "1024x1024";
+  elements.countSelect.value = "1";
+  setSelectValueIfAvailable(elements.editModeSelect, task.style_preset_id);
+  setSelectValueIfAvailable(elements.modelSelect, task.gateway_model_code);
+  setSelectValueIfAvailable(elements.sizeSelect, task.image_size);
+  setSelectValueIfAvailable(elements.countSelect, String(task.image_count));
   renderProgress("idle");
   void refreshEstimate();
   void refreshHistory();
+  elements.actionHint.textContent = `已回填任务 ${task.id} 的参数，可继续调整后创建新任务`;
   elements.promptInput.focus();
+}
+
+function setSelectValueIfAvailable(select, value) {
+  if (value === null || value === undefined) {
+    return;
+  }
+
+  const normalizedValue = String(value);
+
+  if (Array.from(select.options).some((option) => option.value === normalizedValue)) {
+    select.value = normalizedValue;
+  }
+}
+
+function clearReeditSource() {
+  state.referenceFileId = null;
+  state.referencePreviewUrl = null;
+  state.sourceTaskId = null;
 }
 
 function showError(message) {

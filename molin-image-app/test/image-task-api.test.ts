@@ -214,6 +214,7 @@ void test("图生图任务创建会校验输入文件并返回输入图与输出
         prompt: "换成海边黄昏背景",
         style_preset_id: "change_background",
         input_file_ids: ["file_input_001"],
+        source_task_id: "task_history_source_001",
         gateway_model_code: "image-edit-default",
         gateway_capability: "image_edit",
         image_size: "1024x1024",
@@ -232,6 +233,7 @@ void test("图生图任务创建会校验输入文件并返回输入图与输出
     });
     assert.equal(imageTaskService.createRequests[0]?.taskType, "image_to_image");
     assert.equal(imageTaskService.createRequests[0]?.stylePresetId, "change_background");
+    assert.equal(imageTaskService.createRequests[0]?.sourceTaskId, "task_history_source_001");
     assert.equal(imageTaskService.createRequests[0]?.gatewayCapability, "image_edit");
     assert.equal(imageGenerationWorkerService.taskIds[0], "task_api_001");
     assert.equal(body.task.status, "succeeded");
@@ -473,7 +475,8 @@ class FakeImageTaskService {
       task: {
         ...createTaskResult("task_api_001", request.ownerUserId, "billing_reserved"),
         task_type: request.taskType,
-        upscale_factor: request.upscaleFactor ?? null
+        upscale_factor: request.upscaleFactor ?? null,
+        source_task_id: request.sourceTaskId ?? null
       }
     });
   }
@@ -730,6 +733,7 @@ function createTaskResult(
     image_size: "1024x1024",
     image_count: 1,
     upscale_factor: null,
+    source_task_id: null,
     cost_points: null,
     billing_event_id: null,
     error_code: null,

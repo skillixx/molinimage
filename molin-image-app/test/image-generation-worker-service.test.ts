@@ -501,6 +501,8 @@ class InMemoryImageTasksRepository implements ImageTasksRepository {
     const now = new Date("2026-07-09T00:00:00.000Z").toISOString();
     const record: ImageTaskRecord = {
       ...input,
+      source_task_id: input.source_task_id ?? null,
+      entitlement_id: input.entitlement_id ?? null,
       upscale_factor: input.upscale_factor ?? null,
       output_file_ids: [],
       text_result: null,

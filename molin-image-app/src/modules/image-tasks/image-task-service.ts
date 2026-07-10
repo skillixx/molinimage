@@ -26,6 +26,7 @@ export interface CreateImageTaskRequest {
   imageSize?: string;
   imageCount?: number;
   upscaleFactor?: number;
+  sourceTaskId?: string;
   idempotencyKey?: string;
   entitlementId?: number;
 }
@@ -67,8 +68,20 @@ export interface ImageTaskRetryResult {
   retried_from_task_id: string;
 }
 
+export interface ImageTaskAuditEvent {
+  event_type: "source_task_access_denied";
+  actor_user_id: number;
+  source_task_id: string;
+  reason: "owner_mismatch";
+}
+
+export interface ImageTaskAuditLogger {
+  record(event: ImageTaskAuditEvent): void | Promise<void>;
+}
+
 export interface PublicImageTask {
   id: string;
+  source_task_id: string | null;
   owner_user_id: number;
   task_type: string;
   status: ImageTaskStatus;
@@ -141,7 +154,8 @@ const allowedTransitions: ReadonlyMap<ImageTaskStatus, readonly ImageTaskStatus[
 export class ImageTaskService {
   constructor(
     private readonly repository: ImageTasksRepository,
-    private readonly billingService?: Pick<BillingService, "release" | "reserve" | "settle">
+    private readonly billingService?: Pick<BillingService, "release" | "reserve" | "settle">,
+    private readonly auditLogger?: ImageTaskAuditLogger
   ) {}
 
   async createTask(request: CreateImageTaskRequest): Promise<ImageTaskResult> {
@@ -158,7 +172,51 @@ export class ImageTaskService {
     }
 
     const inputFileIds = normalizeStringArray(request.inputFileIds ?? [], "input_file_ids");
+    const prompt = normalizeOptionalString(request.prompt);
+    const negativePrompt = normalizeOptionalString(request.negativePrompt);
     const stylePresetId = normalizeOptionalString(request.stylePresetId);
+    const gatewayModelCode = normalizeOptionalString(request.gatewayModelCode);
+    const gatewayCapability = normalizeOptionalString(request.gatewayCapability);
+    const quality = normalizeOptionalString(request.quality);
+    const imageSize = normalizeOptionalString(request.imageSize);
+    const upscaleFactor = request.upscaleFactor ?? null;
+    const sourceTaskId = normalizeOptionalString(request.sourceTaskId);
+    const entitlementId = request.entitlementId ?? null;
+
+    if (entitlementId !== null && (!Number.isInteger(entitlementId) || entitlementId < 1)) {
+      throw new ImageTaskServiceError("ENTITLEMENT_ID_INVALID", "权益 ID 必须是正整数。", 400);
+    }
+
+    const taskCreateIdempotencyKey =
+      normalizeOptionalString(request.idempotencyKey) ?? `task_create_${randomUUID()}`;
+    const existingTask = await this.repository.findByIdempotencyKey(taskCreateIdempotencyKey);
+
+    if (existingTask !== undefined) {
+      if (existingTask.owner_user_id !== request.ownerUserId) {
+        throw new ImageTaskServiceError("IMAGE_TASK_FORBIDDEN", "不能访问他人的图片任务。", 403);
+      }
+
+      assertIdempotentTaskMatches(existingTask, {
+        taskType,
+        prompt,
+        negativePrompt,
+        stylePresetId,
+        inputFileIds,
+        gatewayModelCode,
+        gatewayCapability,
+        quality,
+        imageSize,
+        imageCount,
+        upscaleFactor,
+        sourceTaskId,
+        entitlementId
+      });
+
+      // 幂等键命中时直接返回已有任务；来源后来被删除也不能改变首次成功请求的结果。
+      return {
+        task: toPublicImageTask(existingTask)
+      };
+    }
 
     if (taskType === "image_restore") {
       if (inputFileIds.length !== 1) {
@@ -184,7 +242,7 @@ export class ImageTaskService {
         );
       }
 
-      if (request.upscaleFactor !== 2 && request.upscaleFactor !== 4) {
+      if (upscaleFactor !== 2 && upscaleFactor !== 4) {
         // 倍率在计费预占前校验，避免非法任务占用用户额度或进入 AI 网关。
         throw new ImageTaskServiceError(
           "UPSCALE_FACTOR_INVALID",
@@ -202,23 +260,16 @@ export class ImageTaskService {
       }
     }
 
-    const taskId = `task_${randomUUID().replaceAll("-", "")}`;
-    const taskCreateIdempotencyKey =
-      normalizeOptionalString(request.idempotencyKey) ?? `task_create_${randomUUID()}`;
-
-    const existingTask = await this.repository.findByIdempotencyKey(taskCreateIdempotencyKey);
-
-    if (existingTask !== undefined) {
-      if (existingTask.owner_user_id !== request.ownerUserId) {
-        throw new ImageTaskServiceError("IMAGE_TASK_FORBIDDEN", "不能访问他人的图片任务。", 403);
-      }
-
-      // 幂等键命中时直接返回已有任务，避免重试接口或浏览器重复提交再次预占积分。
-      return {
-        task: toPublicImageTask(existingTask)
-      };
+    if (sourceTaskId !== null) {
+      await this.assertReeditSource({
+        ownerUserId: request.ownerUserId,
+        taskType,
+        sourceTaskId,
+        inputFileIds
+      });
     }
 
+    const taskId = `task_${randomUUID().replaceAll("-", "")}`;
     const reserveIdempotencyKey = `${taskId}:${taskType}:reserve`;
     const reservedBilling =
       this.billingService === undefined
@@ -228,28 +279,30 @@ export class ImageTaskService {
             taskId,
             taskType,
             imageCount,
-            quality: request.quality,
-            imageSize: request.imageSize,
-            upscaleFactor: request.upscaleFactor,
-            entitlementId: request.entitlementId,
+            quality: quality ?? undefined,
+            imageSize: imageSize ?? undefined,
+            upscaleFactor: upscaleFactor ?? undefined,
+            entitlementId: entitlementId ?? undefined,
             idempotencyKey: reserveIdempotencyKey
           });
     const task = await this.repository.create({
       id: taskId,
+      source_task_id: sourceTaskId,
       owner_user_id: request.ownerUserId,
+      entitlement_id: entitlementId,
       task_type: taskType,
       // 接入计费后，任务创建成功即表示预占已完成；余额不足会在写任务前抛错。
       status: reservedBilling === undefined ? "pending" : "billing_reserved",
-      prompt: normalizeOptionalString(request.prompt),
-      negative_prompt: normalizeOptionalString(request.negativePrompt),
+      prompt,
+      negative_prompt: negativePrompt,
       style_preset_id: stylePresetId,
       input_file_ids: inputFileIds,
-      gateway_model_code: normalizeOptionalString(request.gatewayModelCode),
-      gateway_capability: normalizeOptionalString(request.gatewayCapability),
-      quality: normalizeOptionalString(request.quality),
-      image_size: normalizeOptionalString(request.imageSize),
+      gateway_model_code: gatewayModelCode,
+      gateway_capability: gatewayCapability,
+      quality,
+      image_size: imageSize,
       image_count: imageCount,
-      upscale_factor: request.upscaleFactor ?? null,
+      upscale_factor: upscaleFactor,
       cost_points: reservedBilling?.estimate.estimated_points ?? null,
       billing_event_id: reservedBilling?.billing_event.id ?? null,
       idempotency_key: taskCreateIdempotencyKey
@@ -354,6 +407,7 @@ export class ImageTaskService {
       imageSize: sourceTask.image_size ?? undefined,
       imageCount: sourceTask.image_count,
       upscaleFactor: sourceTask.upscale_factor ?? undefined,
+      sourceTaskId: sourceTask.source_task_id ?? undefined,
       entitlementId,
       // 一个失败任务只生成一个稳定 retry task；重复点击重试按钮会返回同一个任务，防止重复扣费。
       idempotencyKey: `retry:${sourceTask.id}`
@@ -500,6 +554,67 @@ export class ImageTaskService {
       retryPending: currentTask.status === "billing_pending"
     });
   }
+
+  private async assertReeditSource(input: {
+    ownerUserId: number;
+    taskType: string;
+    sourceTaskId: string;
+    inputFileIds: string[];
+  }): Promise<void> {
+    if (input.taskType !== "image_to_image") {
+      throw new ImageTaskServiceError(
+        "SOURCE_TASK_TYPE_INVALID",
+        "再次编辑只能创建图生图任务。",
+        400
+      );
+    }
+
+    const sourceTask = await this.repository.findById(input.sourceTaskId);
+
+    if (sourceTask === undefined) {
+      throw new ImageTaskServiceError("SOURCE_TASK_NOT_FOUND", "来源任务不存在。", 404);
+    }
+
+    // 来源任务必须归属当前会话用户，不能借 source_task_id 枚举或复用他人的生成结果。
+    if (sourceTask.owner_user_id !== input.ownerUserId) {
+      await this.recordAuditEvent({
+        event_type: "source_task_access_denied",
+        actor_user_id: input.ownerUserId,
+        source_task_id: input.sourceTaskId,
+        reason: "owner_mismatch"
+      });
+      throw new ImageTaskServiceError("SOURCE_TASK_FORBIDDEN", "不能再次编辑他人的任务。", 403);
+    }
+
+    // 只有仍在历史中可用的成功作品才能再次编辑，失败、处理中或已删除任务一律拒绝。
+    if (sourceTask.status !== "succeeded" || sourceTask.deleted_at !== null) {
+      throw new ImageTaskServiceError(
+        "SOURCE_TASK_NOT_AVAILABLE",
+        "来源任务尚未成功或已被删除。",
+        409
+      );
+    }
+
+    if (
+      input.inputFileIds.length !== 1 ||
+      !sourceTask.output_file_ids.includes(input.inputFileIds[0] ?? "")
+    ) {
+      // 来源关系与输入图必须一致，防止前端伪造 source_task_id 形成错误作品链路。
+      throw new ImageTaskServiceError(
+        "SOURCE_TASK_FILE_MISMATCH",
+        "输入图片不是来源任务的生成结果。",
+        400
+      );
+    }
+  }
+
+  private async recordAuditEvent(event: ImageTaskAuditEvent): Promise<void> {
+    try {
+      await this.auditLogger?.record(event);
+    } catch {
+      // 审计旁路故障不能改变权限拒绝结果，避免日志系统异常放大为接口可用性问题。
+    }
+  }
 }
 
 function assertTransitionAllowed(fromStatus: ImageTaskStatus, toStatus: ImageTaskStatus): void {
@@ -530,6 +645,55 @@ function assertFailureReason(request: TransitionImageTaskRequest): void {
       400
     );
   }
+}
+
+interface NormalizedTaskCreationParameters {
+  taskType: string;
+  prompt: string | null;
+  negativePrompt: string | null;
+  stylePresetId: string | null;
+  inputFileIds: string[];
+  gatewayModelCode: string | null;
+  gatewayCapability: string | null;
+  quality: string | null;
+  imageSize: string | null;
+  imageCount: number;
+  upscaleFactor: number | null;
+  sourceTaskId: string | null;
+  entitlementId: number | null;
+}
+
+function assertIdempotentTaskMatches(
+  existingTask: ImageTaskRecord,
+  input: NormalizedTaskCreationParameters
+): void {
+  const matches =
+    existingTask.task_type === input.taskType &&
+    existingTask.prompt === input.prompt &&
+    existingTask.negative_prompt === input.negativePrompt &&
+    existingTask.style_preset_id === input.stylePresetId &&
+    arraysEqual(existingTask.input_file_ids, input.inputFileIds) &&
+    existingTask.gateway_model_code === input.gatewayModelCode &&
+    existingTask.gateway_capability === input.gatewayCapability &&
+    existingTask.quality === input.quality &&
+    existingTask.image_size === input.imageSize &&
+    existingTask.image_count === input.imageCount &&
+    existingTask.upscale_factor === input.upscaleFactor &&
+    existingTask.source_task_id === input.sourceTaskId &&
+    existingTask.entitlement_id === input.entitlementId;
+
+  if (!matches) {
+    // 同一幂等键不能代表两组不同参数，否则调用方可能误以为新参数已经生效。
+    throw new ImageTaskServiceError(
+      "IMAGE_TASK_IDEMPOTENCY_CONFLICT",
+      "幂等键已被其他任务参数使用。",
+      409
+    );
+  }
+}
+
+function arraysEqual(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((item, index) => item === right[index]);
 }
 
 function normalizeRequiredString(value: string, fieldName: string): string {
@@ -597,6 +761,7 @@ function normalizePageSize(value: number): number {
 function toPublicImageTask(task: ImageTaskRecord): PublicImageTask {
   return {
     id: task.id,
+    source_task_id: task.source_task_id,
     owner_user_id: task.owner_user_id,
     task_type: task.task_type,
     status: task.status,

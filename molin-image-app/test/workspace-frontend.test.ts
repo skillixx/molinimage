@@ -102,6 +102,7 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果�
   assert.match(html, /<span>模型<\/span>\s*<select id="modelSelect"><\/select>/);
   assert.match(html, /id="sizeField">\s*<span>尺寸<\/span>/);
   assert.match(html, /id="countField">\s*<span>数量<\/span>/);
+  assert.match(html, /id="referencePreview"/);
   assert.match(html, /老照片修复/);
   assert.match(html, /去噪增强/);
   assert.match(html, /模糊变清晰/);
@@ -128,7 +129,17 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果�
   assert.match(workbench, /图片修复属于高消耗任务/);
   assert.match(workbench, /gateway_capability: "image_edit"/);
   assert.match(workbench, /model\.supported_task_types\.includes\(state\.mode\)/);
-  assert.match(workbench, /useFileAsReference/);
+  assert.match(workbench, /再次编辑/);
+  assert.match(workbench, /useTaskForReedit/);
+  assert.match(workbench, /source_task_id: state\.sourceTaskId/);
+  assert.match(workbench, /elements\.promptInput\.value = task\.prompt \?\? ""/);
+  assert.match(workbench, /state\.referenceFileId = file\.file\.id/);
+  assert.match(workbench, /elements\.editModeSelect\.value = "keep_subject"/);
+  assert.match(workbench, /elements\.countSelect\.value = "1"/);
+  assert.match(workbench, /history-image-item/);
+  assert.match(workbench, /useTaskForReedit\(task, file\)/);
+  assert.match(workbench, /clearReeditSource/);
+  assert.doesNotMatch(workbench, /files\.slice\(0, 4\)/);
   assert.match(workbench, /input_files/);
   assert.match(styles, /@media \(max-width: 900px\)/);
   assert.match(styles, /\.reference-result/);

@@ -12,7 +12,9 @@ export type ImageTaskStatus =
 
 export interface ImageTaskRecord {
   id: string;
+  source_task_id: string | null;
   owner_user_id: number;
+  entitlement_id: number | null;
   task_type: string;
   status: ImageTaskStatus;
   prompt: string | null;
@@ -41,7 +43,9 @@ export interface ImageTaskRecord {
 
 export interface CreateImageTaskRecordInput {
   id: string;
+  source_task_id?: string | null;
   owner_user_id: number;
+  entitlement_id?: number | null;
   task_type: string;
   status: ImageTaskStatus;
   prompt: string | null;
@@ -96,7 +100,9 @@ export interface ImageTasksRepository {
 
 interface ImageTaskRow extends RowDataPacket {
   id: string;
+  source_task_id: string | null;
   owner_user_id: number;
+  entitlement_id: number | null;
   task_type: string;
   status: ImageTaskStatus;
   prompt: string | null;
@@ -131,7 +137,9 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
       await this.pool.execute<ResultSetHeader>(
         `INSERT INTO image_tasks (
         id,
+        source_task_id,
         owner_user_id,
+        entitlement_id,
         task_type,
         status,
         prompt,
@@ -148,10 +156,12 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
         cost_points,
         billing_event_id,
         idempotency_key
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.id,
+          input.source_task_id ?? null,
           input.owner_user_id,
+          input.entitlement_id ?? null,
           input.task_type,
           input.status,
           input.prompt,
@@ -243,7 +253,9 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
     const [rows] = await this.pool.execute<ImageTaskRow[]>(
       `SELECT
         id,
+        source_task_id,
         owner_user_id,
+        entitlement_id,
         task_type,
         status,
         prompt,
@@ -411,7 +423,9 @@ function parseJsonArray(value: string | string[] | null): string[] {
 
 const imageTaskSelectSql = `SELECT
   id,
+  source_task_id,
   owner_user_id,
+  entitlement_id,
   task_type,
   status,
   prompt,

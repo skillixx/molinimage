@@ -74,6 +74,39 @@ void test("高清放大 migration 为任务增加倍率字段并支持回滚", a
   assert.match(downSql, /DROP COLUMN upscale_factor/i);
 });
 
+void test("再次编辑 migration 为任务增加来源关系并建立查询索引", async () => {
+  const upSql = await readFile(resolve("migrations", "004_add_source_task_id.up.sql"), "utf8");
+  const downSql = await readFile(resolve("migrations", "004_add_source_task_id.down.sql"), "utf8");
+
+  assert.match(upSql, /ADD COLUMN source_task_id VARCHAR\(64\) NULL/i);
+  assert.match(upSql, /idx_image_tasks_source_task_id/i);
+  assert.match(downSql, /DROP INDEX idx_image_tasks_source_task_id/i);
+  assert.match(downSql, /DROP COLUMN source_task_id/i);
+});
+
+void test("任务权益 migration 支持幂等请求核对首次计费权益", async () => {
+  const upSql = await readFile(resolve("migrations", "005_add_task_entitlement_id.up.sql"), "utf8");
+  const downSql = await readFile(
+    resolve("migrations", "005_add_task_entitlement_id.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /ADD COLUMN entitlement_id BIGINT UNSIGNED NULL/i);
+  assert.match(downSql, /DROP COLUMN entitlement_id/i);
+});
+
+void test("历史任务权益 migration 从预占计费事件回填权益 ID", async () => {
+  const sql = await readFile(
+    resolve("migrations", "006_backfill_task_entitlement_id.up.sql"),
+    "utf8"
+  );
+
+  assert.match(sql, /JOIN billing_events AS billing_event/i);
+  assert.match(sql, /billing_event\.id = image_task\.billing_event_id/i);
+  assert.match(sql, /SET image_task\.entitlement_id = billing_event\.moling_entitlement_id/i);
+  assert.match(sql, /billing_event\.event_type = 'reserve'/i);
+});
+
 async function readAllUpMigrations(): Promise<string> {
   const migrationsDir = resolve("migrations");
   const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".up.sql")).sort();

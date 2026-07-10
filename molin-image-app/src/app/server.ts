@@ -18,6 +18,7 @@ import { MySqlImageTasksRepository } from "../infrastructure/database/image-task
 import { MolingClient } from "../infrastructure/moling/moling-client.js";
 import { MinioStorageService } from "../infrastructure/storage/minio-storage-service.js";
 import { BillingService } from "../modules/billing/billing-service.js";
+import { ConsoleImageTaskAuditLogger } from "../infrastructure/audit/console-image-task-audit-logger.js";
 import { FileService } from "../modules/files/file-service.js";
 import { ImageModelService } from "../modules/image-models/image-model-service.js";
 import { ImageTaskService } from "../modules/image-tasks/image-task-service.js";
@@ -37,7 +38,12 @@ const billingService = new BillingService(
   billingEventsRepository,
   molingClient
 );
-const imageTaskService = new ImageTaskService(imageTasksRepository, billingService);
+const imageTaskAuditLogger = new ConsoleImageTaskAuditLogger();
+const imageTaskService = new ImageTaskService(
+  imageTasksRepository,
+  billingService,
+  imageTaskAuditLogger
+);
 const modelCatalogClient = new EnvAiGatewayModelCatalogClient(config.imageModelCatalogJson);
 const imageGenerationClient = new HttpAiGatewayImageGenerationClient(config);
 const imageEditClient = new HttpAiGatewayImageEditClient(config);

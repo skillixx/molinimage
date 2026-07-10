@@ -267,6 +267,21 @@ textarea {
   line-height: 1.45;
 }
 
+.reference-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+}
+
+.reference-preview img {
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  object-fit: cover;
+}
+
 .field-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 180px 120px;
@@ -579,6 +594,18 @@ textarea {
   border-radius: 8px;
   object-fit: cover;
   background: var(--surface-muted);
+}
+
+.history-image-item {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.history-reedit-button {
+  width: 100%;
+  min-height: 30px;
+  font-size: 12px;
 }
 
 .history-actions {

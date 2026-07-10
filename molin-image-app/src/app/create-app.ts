@@ -473,6 +473,7 @@ async function handleCreateImageTask(
       imageSize: readOptionalStringField(body, "image_size"),
       imageCount: readOptionalNumberField(body, "image_count"),
       upscaleFactor: readOptionalNumberField(body, "upscale_factor"),
+      sourceTaskId: readOptionalStringField(body, "source_task_id"),
       idempotencyKey:
         readHeader(request, "idempotency-key") ?? readOptionalStringField(body, "idempotency_key"),
       entitlementId
