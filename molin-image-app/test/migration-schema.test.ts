@@ -13,7 +13,9 @@ const requiredTables = [
   "ai_gateway_call_logs",
   "style_presets",
   "user_collections",
-  "pricing_rules"
+  "pricing_rules",
+  "image_model_configs",
+  "image_model_defaults"
 ];
 const requiredIndexes = [
   "uk_image_tasks_idempotency_key",
@@ -29,7 +31,10 @@ const requiredIndexes = [
   "uk_user_collections_owner_task",
   "idx_user_collections_owner_created",
   "idx_pricing_rules_task_active",
-  "idx_pricing_rules_capability_active"
+  "idx_pricing_rules_capability_active",
+  "uk_image_model_configs_source",
+  "idx_image_model_configs_visible",
+  "idx_image_model_defaults_model"
 ];
 
 void test("基础表 migration 包含 P1-G02 要求的表、引擎、字符集和关键索引", async () => {
@@ -145,6 +150,25 @@ void test("价格规则维度 migration 禁止重复匹配规则", async () => {
   assert.match(upSql, /GENERATED ALWAYS AS/i);
   assert.match(upSql, /uk_pricing_rules_task_dimensions/i);
   assert.match(downSql, /DROP INDEX uk_pricing_rules_task_dimensions/i);
+});
+
+void test("模型管理 migration 支持同步、开关和默认模型配置", async () => {
+  const upSql = await readFile(
+    resolve("migrations", "009_create_image_model_configs.up.sql"),
+    "utf8"
+  );
+  const downSql = await readFile(
+    resolve("migrations", "009_create_image_model_configs.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /CREATE TABLE IF NOT EXISTS image_model_configs/i);
+  assert.match(upSql, /admin_enabled/i);
+  assert.match(upSql, /supported_task_types JSON/i);
+  assert.match(upSql, /CREATE TABLE IF NOT EXISTS image_model_defaults/i);
+  assert.match(upSql, /PRIMARY KEY \(task_type\)/i);
+  assert.match(downSql, /DROP TABLE IF EXISTS image_model_defaults/i);
+  assert.match(downSql, /DROP TABLE IF EXISTS image_model_configs/i);
 });
 
 async function readAllUpMigrations(): Promise<string> {

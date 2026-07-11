@@ -20,6 +20,7 @@ import type {
 } from "../modules/image-tasks/image-task-service.js";
 import { ImageTaskServiceError } from "../modules/image-tasks/image-task-service.js";
 import type { ImageModelService } from "../modules/image-models/image-model-service.js";
+import { ImageModelServiceError } from "../modules/image-models/image-model-service.js";
 import {
   MolingTicketError,
   type LaunchTicketVerifier
@@ -40,7 +41,10 @@ export interface AppDependencies {
     FileService,
     "uploadFile" | "createDownloadUrl" | "createPreviewUrls" | "assertFilesOwned"
   >;
-  imageModelService?: Pick<ImageModelService, "listVisibleImageModels">;
+  imageModelService?: Pick<ImageModelService, "listVisibleImageModels"> &
+    Partial<
+      Pick<ImageModelService, "listManagedModels" | "syncModelCatalog" | "updateManagedModel">
+    >;
   imageTaskService?: Pick<
     ImageTaskService,
     | "createTask"
@@ -90,6 +94,21 @@ async function handleRequest(
     }
 
     await servePublicFile(response, requestId, "admin-pricing.html");
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/admin/models") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有模型管理权限。");
+      return;
+    }
+
+    await servePublicFile(response, requestId, "admin-models.html");
     return;
   }
 
@@ -288,6 +307,110 @@ async function handleRequest(
     }
 
     await handleImageModels(response, requestId, session.user_id, dependencies.imageModelService);
+    return;
+  }
+
+  if (url.pathname === "/api/admin/image/models") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有模型管理权限。");
+      return;
+    }
+
+    if (
+      dependencies.imageModelService?.listManagedModels === undefined ||
+      dependencies.imageModelService.syncModelCatalog === undefined
+    ) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "IMAGE_MODEL_SERVICE_UNAVAILABLE",
+        "模型管理服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleAdminImageModels(
+      request,
+      response,
+      requestId,
+      session.user_id,
+      dependencies.imageModelService as Pick<
+        ImageModelService,
+        "listManagedModels" | "syncModelCatalog"
+      >
+    );
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/admin/image/models/sync") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有模型管理权限。");
+      return;
+    }
+
+    if (dependencies.imageModelService?.syncModelCatalog === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "IMAGE_MODEL_SERVICE_UNAVAILABLE",
+        "模型管理服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleSyncImageModels(
+      response,
+      requestId,
+      session.user_id,
+      dependencies.imageModelService as Pick<ImageModelService, "syncModelCatalog">
+    );
+    return;
+  }
+
+  const adminImageModelMatch = /^\/api\/admin\/image\/models\/([^/]+)$/u.exec(url.pathname);
+
+  if (request.method === "PATCH" && adminImageModelMatch !== null) {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有模型管理权限。");
+      return;
+    }
+
+    if (dependencies.imageModelService?.updateManagedModel === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "IMAGE_MODEL_SERVICE_UNAVAILABLE",
+        "模型管理服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleUpdateImageModel(
+      request,
+      response,
+      requestId,
+      session.user_id,
+      decodeURIComponent(adminImageModelMatch[1]),
+      dependencies.imageModelService as Pick<ImageModelService, "updateManagedModel">
+    );
     return;
   }
 
@@ -1016,6 +1139,109 @@ async function handleImageModels(
   }
 }
 
+async function handleAdminImageModels(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  ownerUserId: number,
+  imageModelService: Pick<ImageModelService, "listManagedModels" | "syncModelCatalog">
+): Promise<void> {
+  try {
+    if (request.method === "GET") {
+      const result = await imageModelService.listManagedModels(ownerUserId);
+      writeJson(response, 200, result);
+      return;
+    }
+
+    writeError(response, 405, requestId, "METHOD_NOT_ALLOWED", "请求方法不支持。");
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+async function handleSyncImageModels(
+  response: ServerResponse,
+  requestId: string,
+  ownerUserId: number,
+  imageModelService: Pick<ImageModelService, "syncModelCatalog">
+): Promise<void> {
+  try {
+    // 同步只读取服务端模型目录环境变量并写入管理态，不接收浏览器传入的模型密钥或网关参数。
+    const result = await imageModelService.syncModelCatalog(ownerUserId);
+    writeJson(response, 200, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+async function handleUpdateImageModel(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  ownerUserId: number,
+  modelId: string,
+  imageModelService: Pick<ImageModelService, "updateManagedModel">
+): Promise<void> {
+  try {
+    const body = await readJsonBody(request);
+    const result = await imageModelService.updateManagedModel(
+      modelId,
+      readUpdateImageModelRequest(body),
+      ownerUserId
+    );
+
+    writeJson(response, 200, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+function readUpdateImageModelRequest(body: Record<string, unknown>) {
+  const result: {
+    displayName?: string;
+    description?: string;
+    capability?: string;
+    adminEnabled?: boolean;
+    supportedTaskTypes?: string[];
+    supportedImageSizes?: string[];
+    maxInputFiles?: number;
+    maxOutputCount?: number;
+    sortOrder?: number;
+    defaultTaskTypes?: string[];
+  } = {};
+
+  assignIfPresent(body, "display_name", result, "displayName", readOptionalStringField);
+  assignIfPresent(body, "description", result, "description", readOptionalStringField);
+  assignIfPresent(body, "capability", result, "capability", readOptionalStringField);
+  assignIfPresent(body, "admin_enabled", result, "adminEnabled", readOptionalBooleanField);
+  assignIfPresent(
+    body,
+    "supported_task_types",
+    result,
+    "supportedTaskTypes",
+    readOptionalStringArrayField
+  );
+  assignIfPresent(
+    body,
+    "supported_image_sizes",
+    result,
+    "supportedImageSizes",
+    readOptionalStringArrayField
+  );
+  assignIfPresent(body, "max_input_files", result, "maxInputFiles", readOptionalNumberField);
+  assignIfPresent(body, "max_output_count", result, "maxOutputCount", readOptionalNumberField);
+  assignIfPresent(body, "sort_order", result, "sortOrder", readOptionalNumberField);
+  assignIfPresent(
+    body,
+    "default_task_types",
+    result,
+    "defaultTaskTypes",
+    readOptionalStringArrayField
+  );
+
+  return result;
+}
+
 function configSafeRequiredCapabilitiesFallback(): string[] {
   return ["image_generation", "vision_text", "moderation"];
 }
@@ -1181,6 +1407,11 @@ function writePublicError(response: ServerResponse, requestId: string, error: un
   }
 
   if (error instanceof PricingRuleServiceError) {
+    writeError(response, error.statusCode, requestId, error.code, error.message);
+    return;
+  }
+
+  if (error instanceof ImageModelServiceError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
     return;
   }

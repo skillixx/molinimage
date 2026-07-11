@@ -146,6 +146,7 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果�
   assert.match(workbench, /error\?\.code === "BILLING_PRICE_CHANGED"/);
   assert.match(workbench, /await refreshEstimate\(\)/);
   assert.match(workbench, /model\.supported_task_types\.includes\(state\.mode\)/);
+  assert.match(workbench, /model\.default_task_types\.includes\(state\.mode\)/);
   assert.match(workbench, /再次编辑/);
   assert.match(workbench, /useTaskForReedit/);
   assert.match(workbench, /source_task_id: state\.sourceTaskId/);
@@ -227,6 +228,26 @@ void test("价格管理页覆盖多维规则、编辑和启停操作", async () 
   assert.match(script, /button\.disabled = mutating/);
   assert.doesNotMatch(script, /\bfetch\(/);
   assert.match(apiClient, /\/api\/admin\/image\/pricing-rules/);
+  assert.match(apiClient, /method: "PATCH"/);
+});
+
+void test("模型管理页覆盖同步、能力标签、默认模型和启停操作", async () => {
+  const html = await readFile(resolve("public", "admin-models.html"), "utf8");
+  const script = await readFile(resolve("public", "assets", "admin-models.js"), "utf8");
+  const apiClient = await readFile(resolve("public", "assets", "admin-models-api.js"), "utf8");
+
+  assert.match(html, /模型管理/);
+  assert.match(html, /id="syncModels"/);
+  assert.match(html, /id="capability"/);
+  assert.match(html, /id="supportedTaskTypes"/);
+  assert.match(html, /id="defaultTaskTypes"/);
+  assert.match(script, /syncImageModels\(\)/);
+  assert.match(script, /admin_enabled: elements\.adminEnabled\.checked/);
+  assert.match(script, /default_task_types: splitCsv\(elements\.defaultTaskTypes\.value\)/);
+  assert.match(script, /updateImageModel\(model\.id, \{ admin_enabled: !model\.admin_enabled \}\)/);
+  assert.doesNotMatch(script, /\bfetch\(/);
+  assert.match(apiClient, /\/api\/admin\/image\/models/);
+  assert.match(apiClient, /\/sync/);
   assert.match(apiClient, /method: "PATCH"/);
 });
 

@@ -81,6 +81,20 @@ export interface ImageTaskAuditLogger {
   record(event: ImageTaskAuditEvent): void | Promise<void>;
 }
 
+export interface ImageTaskModelResolver {
+  resolveTaskModel(
+    userId: number,
+    input: {
+      taskType: string;
+      gatewayModelCode?: string | null;
+      gatewayCapability?: string | null;
+      imageSize?: string | null;
+      imageCount?: number;
+      inputFileCount?: number;
+    }
+  ): Promise<{ gatewayModelCode: string; gatewayCapability: string } | null>;
+}
+
 export interface PublicImageTask {
   id: string;
   source_task_id: string | null;
@@ -157,7 +171,8 @@ export class ImageTaskService {
   constructor(
     private readonly repository: ImageTasksRepository,
     private readonly billingService?: Pick<BillingService, "release" | "reserve" | "settle">,
-    private readonly auditLogger?: ImageTaskAuditLogger
+    private readonly auditLogger?: ImageTaskAuditLogger,
+    private readonly modelResolver?: ImageTaskModelResolver
   ) {}
 
   async createTask(request: CreateImageTaskRequest): Promise<ImageTaskResult> {
@@ -177,16 +192,44 @@ export class ImageTaskService {
     const prompt = normalizeOptionalString(request.prompt);
     const negativePrompt = normalizeOptionalString(request.negativePrompt);
     const stylePresetId = normalizeOptionalString(request.stylePresetId);
-    const gatewayModelCode = normalizeOptionalString(request.gatewayModelCode);
-    const gatewayCapability = normalizeOptionalString(request.gatewayCapability);
+    const requestedGatewayModelCode = normalizeOptionalString(request.gatewayModelCode);
+    const requestedGatewayCapability = normalizeOptionalString(request.gatewayCapability);
     const quality = normalizeOptionalString(request.quality);
     const imageSize = normalizeOptionalString(request.imageSize);
+    const resolvedModel =
+      this.modelResolver === undefined
+        ? null
+        : await this.modelResolver.resolveTaskModel(request.ownerUserId, {
+            taskType,
+            gatewayModelCode: requestedGatewayModelCode,
+            gatewayCapability: requestedGatewayCapability,
+            imageSize,
+            imageCount,
+            inputFileCount: inputFileIds.length
+          });
+    const gatewayModelCode =
+      this.modelResolver === undefined
+        ? requestedGatewayModelCode
+        : (resolvedModel?.gatewayModelCode ?? null);
+    const gatewayCapability =
+      this.modelResolver === undefined
+        ? requestedGatewayCapability
+        : (resolvedModel?.gatewayCapability ?? null);
     const upscaleFactor = request.upscaleFactor ?? null;
     const sourceTaskId = normalizeOptionalString(request.sourceTaskId);
     const entitlementId = request.entitlementId ?? null;
 
     if (entitlementId !== null && (!Number.isInteger(entitlementId) || entitlementId < 1)) {
       throw new ImageTaskServiceError("ENTITLEMENT_ID_INVALID", "权益 ID 必须是正整数。", 400);
+    }
+
+    if (this.modelResolver !== undefined && resolvedModel === null) {
+      // 模型可见性和能力匹配必须在计费预占前完成，避免关闭模型或错误能力消耗用户积分。
+      throw new ImageTaskServiceError(
+        "IMAGE_MODEL_UNAVAILABLE",
+        "当前模型不可用，或模型能力不支持该任务类型。",
+        400
+      );
     }
 
     const taskCreateIdempotencyKey =

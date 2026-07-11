@@ -18,6 +18,7 @@ import type {
 } from "../src/infrastructure/database/image-tasks-repository.js";
 import {
   type ImageTaskAuditEvent,
+  type ImageTaskModelResolver,
   ImageTaskService,
   ImageTaskServiceError
 } from "../src/modules/image-tasks/image-task-service.js";
@@ -39,6 +40,46 @@ void test("创建图片任务时必须绑定 owner_user_id，并从 pending 开�
   assert.equal(result.task.owner_user_id, 479);
   assert.equal(result.task.status, "pending");
   assert.equal(repository.records.get(result.task.id)?.owner_user_id, 479);
+});
+
+void test("创建任务会使用后台默认模型，并在模型不可用时阻止计费", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new FakeBillingService();
+  const modelResolver = new FakeImageTaskModelResolver({
+    gatewayModelCode: "image-gen-default",
+    gatewayCapability: "image_generation"
+  });
+  const service = new ImageTaskService(repository, billingService, undefined, modelResolver);
+
+  const result = await service.createTask({
+    ownerUserId: 479,
+    taskType: "text_to_image",
+    prompt: "一张产品海报",
+    imageCount: 1,
+    entitlementId: 62
+  });
+
+  assert.equal(result.task.gateway_model_code, "image-gen-default");
+  assert.equal(result.task.gateway_capability, "image_generation");
+  assert.equal(billingService.reserveRequests[0]?.gatewayModelCode, "image-gen-default");
+
+  modelResolver.result = null;
+  await assert.rejects(
+    () =>
+      service.createTask({
+        ownerUserId: 479,
+        taskType: "text_to_image",
+        prompt: "一张产品海报",
+        gatewayModelCode: "closed-model",
+        gatewayCapability: "image_generation",
+        entitlementId: 62
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "IMAGE_MODEL_UNAVAILABLE"
+  );
+
+  // 模型关闭或能力不匹配时必须在计费前失败，避免错误请求占用额度。
+  assert.equal(billingService.reserveRequests.length, 1);
 });
 
 void test("图片修复只接受四种修复类型且必须关联一张原图", async () => {
@@ -977,6 +1018,14 @@ class FakeImageTaskAuditLogger {
 
   record(event: ImageTaskAuditEvent): void {
     this.events.push(event);
+  }
+}
+
+class FakeImageTaskModelResolver implements ImageTaskModelResolver {
+  constructor(public result: { gatewayModelCode: string; gatewayCapability: string } | null) {}
+
+  resolveTaskModel(): Promise<{ gatewayModelCode: string; gatewayCapability: string } | null> {
+    return Promise.resolve(this.result);
   }
 }
 

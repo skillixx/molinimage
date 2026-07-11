@@ -14,6 +14,7 @@ import { MySqlAiGatewayCallLogsRepository } from "../infrastructure/database/ai-
 import { MySqlBillingEventsRepository } from "../infrastructure/database/billing-events-repository.js";
 import { createDatabasePool } from "../infrastructure/database/database-pool.js";
 import { MySqlFilesRepository } from "../infrastructure/database/files-repository.js";
+import { MySqlImageModelConfigsRepository } from "../infrastructure/database/image-model-configs-repository.js";
 import { MySqlImageTasksRepository } from "../infrastructure/database/image-tasks-repository.js";
 import { MySqlPricingRulesRepository } from "../infrastructure/database/pricing-rules-repository.js";
 import { MolingClient } from "../infrastructure/moling/moling-client.js";
@@ -32,11 +33,19 @@ const molingClient = new MolingClient(config);
 const databasePool = createDatabasePool(config);
 const filesRepository = new MySqlFilesRepository(databasePool);
 const imageTasksRepository = new MySqlImageTasksRepository(databasePool);
+const imageModelConfigsRepository = new MySqlImageModelConfigsRepository(databasePool);
 const billingEventsRepository = new MySqlBillingEventsRepository(databasePool);
 const pricingRulesRepository = new MySqlPricingRulesRepository(databasePool);
 const aiGatewayCallLogsRepository = new MySqlAiGatewayCallLogsRepository(databasePool);
 const storageService = new MinioStorageService(config);
 const fileService = new FileService(filesRepository, storageService, config);
+const modelCatalogClient = new EnvAiGatewayModelCatalogClient(config.imageModelCatalogJson);
+const imageModelService = new ImageModelService(
+  modelCatalogClient,
+  config.imageModelEnabledCapabilities,
+  config.imageModelRequiredCapabilities,
+  imageModelConfigsRepository
+);
 const billingService = new BillingService(
   config.billingRulesJson,
   billingEventsRepository,
@@ -49,17 +58,12 @@ const imageTaskAuditLogger = new ConsoleImageTaskAuditLogger();
 const imageTaskService = new ImageTaskService(
   imageTasksRepository,
   billingService,
-  imageTaskAuditLogger
+  imageTaskAuditLogger,
+  imageModelService
 );
-const modelCatalogClient = new EnvAiGatewayModelCatalogClient(config.imageModelCatalogJson);
 const imageGenerationClient = new HttpAiGatewayImageGenerationClient(config);
 const imageEditClient = new HttpAiGatewayImageEditClient(config);
 const visionTextClient = new HttpAiGatewayVisionTextClient(config);
-const imageModelService = new ImageModelService(
-  modelCatalogClient,
-  config.imageModelEnabledCapabilities,
-  config.imageModelRequiredCapabilities
-);
 const imageGenerationWorkerService = new ImageGenerationWorkerService(
   imageTasksRepository,
   imageTaskService,

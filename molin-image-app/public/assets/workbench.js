@@ -927,6 +927,9 @@ function renderModelOptions() {
     const option = document.createElement("option");
     option.value = model.gateway_model_code;
     option.textContent = model.display_name;
+    option.selected = Array.isArray(model.default_task_types)
+      ? model.default_task_types.includes(state.mode)
+      : false;
     elements.modelSelect.append(option);
   }
 }

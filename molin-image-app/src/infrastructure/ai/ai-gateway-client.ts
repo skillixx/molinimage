@@ -1,4 +1,5 @@
 export interface ImageModelCatalogItem {
+  id?: string;
   gateway_model_code: string;
   display_name: string;
   description: string;
@@ -11,6 +12,7 @@ export interface ImageModelCatalogItem {
   supported_output_types: string[];
   max_input_files: number;
   max_output_count: number;
+  default_task_types?: string[];
   sort_order: number;
 }
 
