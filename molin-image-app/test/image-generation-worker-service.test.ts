@@ -434,6 +434,7 @@ void test("图片修复网关失败时任务失败并释放预占积分", async 
 
   assert.equal(result.task.status, "failed");
   assert.equal(result.task.error_code, "AI_GATEWAY_FAILED");
+  assert.equal(result.task.error_message, "AI 模型服务调用失败，请稍后重试。");
   assert.equal(billingService.releaseRequests.length, 1);
   assert.equal(
     billingService.releaseRequests[0]?.idempotencyKey,

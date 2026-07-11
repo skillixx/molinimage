@@ -88,6 +88,10 @@ void test("前端 API 封装只访问应用后端接口", async () => {
 void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果体验", async () => {
   const html = await readFile(resolve("public", "index.html"), "utf8");
   const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
+  const taskDetailFormat = await readFile(
+    resolve("public", "assets", "task-detail-format.js"),
+    "utf8"
+  );
   const styles = await readFile(resolve("public", "assets", "styles.css"), "utf8");
 
   assert.match(html, /预计积分/);
@@ -103,6 +107,9 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果�
   assert.match(html, /id="sizeField">\s*<span>尺寸<\/span>/);
   assert.match(html, /id="countField">\s*<span>数量<\/span>/);
   assert.match(html, /id="referencePreview"/);
+  assert.match(html, /id="taskDetailDrawer"/);
+  assert.match(html, /id="taskDetailContent"/);
+  assert.match(html, /id="taskDetailClose"/);
   assert.match(html, /老照片修复/);
   assert.match(html, /去噪增强/);
   assert.match(html, /模糊变清晰/);
@@ -139,11 +146,59 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果�
   assert.match(workbench, /history-image-item/);
   assert.match(workbench, /useTaskForReedit\(task, file\)/);
   assert.match(workbench, /clearReeditSource/);
+  assert.match(workbench, /getImageTask/);
+  assert.match(workbench, /openTaskDetail/);
+  assert.match(workbench, /查看详情/);
+  assert.match(workbench, /输入参数/);
+  assert.match(workbench, /输入文件/);
+  assert.match(workbench, /输出结果/);
+  assert.match(workbench, /消耗积分/);
+  assert.match(workbench, /resolveTaskFailureMessage/);
+  assert.match(taskDetailFormat, /任务执行失败，请稍后重试。/);
   assert.doesNotMatch(workbench, /files\.slice\(0, 4\)/);
   assert.match(workbench, /input_files/);
   assert.match(styles, /@media \(max-width: 900px\)/);
   assert.match(styles, /\.reference-result/);
   assert.match(styles, /\.task-progress/);
+  assert.match(styles, /\.task-detail-drawer/);
+  assert.match(styles, /\.task-detail-grid/);
+});
+
+void test("任务详情格式化能输出中文失败原因并区分积分状态", async () => {
+  const source = await readFile(resolve("public", "assets", "task-detail-format.js"), "utf8");
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
+  const formatter = (await import(moduleUrl)) as {
+    formatTaskPoints(task: Record<string, unknown>): string;
+    resolveTaskFailureMessage(task: Record<string, unknown>): string;
+  };
+
+  assert.equal(
+    formatter.resolveTaskFailureMessage({
+      error_code: "AI_GATEWAY_FAILED",
+      error_message: "Provider timeout"
+    }),
+    "AI 模型服务调用失败，请稍后重试。"
+  );
+  assert.equal(
+    formatter.resolveTaskFailureMessage({ error_code: "UNKNOWN", error_message: "timeout" }),
+    "任务执行失败，请稍后重试。"
+  );
+  assert.equal(
+    formatter.formatTaskPoints({
+      status: "billing_pending",
+      error_code: "BILLING_SETTLE_PENDING",
+      cost_points: "6"
+    }),
+    "6 积分（结算待对账）"
+  );
+  assert.equal(
+    formatter.formatTaskPoints({
+      status: "failed",
+      error_code: "BILLING_RELEASE_PENDING",
+      cost_points: "6"
+    }),
+    "6 积分（释放待对账）"
+  );
 });
 
 class FakeLaunchTicketVerifier implements LaunchTicketVerifier {

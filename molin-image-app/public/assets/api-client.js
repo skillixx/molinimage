@@ -20,6 +20,10 @@ export async function createImageTask(input) {
   });
 }
 
+export async function getImageTask(taskId) {
+  return await requestJson(`/api/image/tasks/${encodeURIComponent(taskId)}`);
+}
+
 export async function retryImageTask(taskId) {
   return await requestJson(`/api/image/tasks/${encodeURIComponent(taskId)}/retry`, {
     method: "POST"

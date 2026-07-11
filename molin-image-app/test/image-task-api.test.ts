@@ -80,7 +80,8 @@ void test("图片任务创建接口必须登录，并把 session 用户绑定为
 
 void test("图片任务查询和状态流转接口按当前 session 用户调用服务", async () => {
   const imageTaskService = new FakeImageTaskService();
-  const app = await startTestApp(imageTaskService);
+  const fileService = new FakeFileService();
+  const app = await startTestApp(imageTaskService, undefined, fileService);
 
   try {
     const cookie = await createSessionCookie(app.baseUrl);
@@ -89,6 +90,10 @@ void test("图片任务查询和状态流转接口按当前 session 用户调用
         cookie
       }
     });
+    const getBody = (await getResponse.json()) as ImageTaskResult & {
+      input_files: { preview_url: string }[];
+      result_files: { preview_url: string }[];
+    };
     const transitionResponse = await fetch(
       `${app.baseUrl}/api/image/tasks/task_api_001/transitions`,
       {
@@ -109,6 +114,9 @@ void test("图片任务查询和状态流转接口按当前 session 用户调用
     assert.equal(getResponse.status, 200);
     assert.equal(imageTaskService.getRequests[0]?.ownerUserId, 479);
     assert.equal(imageTaskService.getRequests[0]?.taskId, "task_api_001");
+    assert.equal(getBody.task.cost_points, "6");
+    assert.equal(getBody.input_files[0]?.preview_url, "https://storage.example.com/input.png");
+    assert.equal(getBody.result_files[0]?.preview_url, "https://storage.example.com/generated.png");
     assert.equal(transitionResponse.status, 200);
     assert.equal(imageTaskService.transitionRequests[0]?.ownerUserId, 479);
     assert.equal(imageTaskService.transitionRequests[0]?.taskId, "task_api_001");
@@ -485,7 +493,12 @@ class FakeImageTaskService {
     this.getRequests.push({ ownerUserId, taskId });
 
     return Promise.resolve({
-      task: createTaskResult(taskId, ownerUserId, "pending")
+      task: {
+        ...createTaskResult(taskId, ownerUserId, "succeeded"),
+        input_file_ids: ["file_input_001"],
+        output_file_ids: ["file_generated_001"],
+        cost_points: "6"
+      }
     });
   }
 

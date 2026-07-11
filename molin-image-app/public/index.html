@@ -152,6 +152,27 @@
       </main>
     </div>
 
+    <div id="taskDetailBackdrop" class="task-detail-backdrop" hidden></div>
+    <aside
+      id="taskDetailDrawer"
+      class="task-detail-drawer"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="taskDetailTitle"
+      hidden
+    >
+      <header class="task-detail-header">
+        <div>
+          <p class="eyebrow">TASK DETAIL</p>
+          <h2 id="taskDetailTitle">任务详情</h2>
+        </div>
+        <button id="taskDetailClose" class="ghost-button" type="button" aria-label="关闭任务详情">
+          关闭
+        </button>
+      </header>
+      <div id="taskDetailContent" class="task-detail-content" aria-live="polite"></div>
+    </aside>
+
     <script type="module" src="/assets/workbench.js"></script>
   </body>
 </html>

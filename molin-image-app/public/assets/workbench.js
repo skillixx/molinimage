@@ -5,10 +5,16 @@ import {
   favoriteHistoryItem,
   getCurrentUser,
   getImageHistory,
+  getImageTask,
   getImageModels,
   retryImageTask,
   uploadImageFile
 } from "./api-client.js";
+import {
+  formatTaskPoints,
+  formatTaskStatus,
+  resolveTaskFailureMessage
+} from "./task-detail-format.js";
 
 const modeConfig = {
   text_to_image: {
@@ -92,7 +98,11 @@ const elements = {
   taskProgress: document.querySelector("#taskProgress"),
   modelList: document.querySelector("#modelList"),
   resultList: document.querySelector("#resultList"),
-  historyList: document.querySelector("#historyList")
+  historyList: document.querySelector("#historyList"),
+  taskDetailBackdrop: document.querySelector("#taskDetailBackdrop"),
+  taskDetailDrawer: document.querySelector("#taskDetailDrawer"),
+  taskDetailClose: document.querySelector("#taskDetailClose"),
+  taskDetailContent: document.querySelector("#taskDetailContent")
 };
 
 elements.refreshButton.addEventListener("click", () => {
@@ -114,6 +124,13 @@ elements.imageInput.addEventListener("change", () => {
   // 用户重新选择本地图片时，清掉“再次编辑”带来的历史关系，避免一次提交混用两个输入来源。
   clearReeditSource();
   renderUploadHint();
+});
+elements.taskDetailClose.addEventListener("click", closeTaskDetail);
+elements.taskDetailBackdrop.addEventListener("click", closeTaskDetail);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !elements.taskDetailDrawer.hidden) {
+    closeTaskDetail();
+  }
 });
 
 for (const tab of elements.modeTabs) {
@@ -614,6 +631,7 @@ function createImageResultCard(file, task) {
   const actions = document.createElement("div");
   const downloadLink = document.createElement("a");
   const continueButton = document.createElement("button");
+  const detailButton = createTaskDetailButton(task.id);
   const dimensions = document.createElement("small");
 
   item.className = "result-item";
@@ -637,7 +655,7 @@ function createImageResultCard(file, task) {
       ? `${String(file.file.width)} x ${String(file.file.height)}`
       : "尺寸未知";
 
-  actions.append(dimensions, downloadLink);
+  actions.append(dimensions, downloadLink, detailButton);
 
   if (task.status === "succeeded") {
     actions.append(continueButton);
@@ -652,10 +670,12 @@ function createFailedResultCard(task) {
   const title = document.createElement("strong");
   const message = document.createElement("p");
   const retryButton = document.createElement("button");
+  const detailButton = createTaskDetailButton(task.id);
+  const actions = document.createElement("div");
 
   item.className = "failed-result";
   title.textContent = "生成失败，积分已释放";
-  message.textContent = task.error_message ?? "任务失败，本次不会扣除积分。";
+  message.textContent = resolveTaskFailureMessage(task);
   retryButton.type = "button";
   retryButton.className = "primary-button";
   retryButton.textContent = "重试";
@@ -670,7 +690,9 @@ function createFailedResultCard(task) {
     });
   });
 
-  item.append(title, message, retryButton);
+  actions.className = "result-actions";
+  actions.append(retryButton, detailButton);
+  item.append(title, message, actions);
 
   return item;
 }
@@ -1004,10 +1026,238 @@ function renderHistory(items) {
     });
     actions.append(deleteButton);
 
+    actions.prepend(createTaskDetailButton(task.id));
+
     item.append(actions);
 
     elements.historyList.append(item);
   }
+}
+
+function createTaskDetailButton(taskId) {
+  const button = document.createElement("button");
+
+  button.type = "button";
+  button.className = "ghost-button";
+  button.textContent = "查看详情";
+  button.addEventListener("click", () => {
+    void openTaskDetail(taskId);
+  });
+
+  return button;
+}
+
+async function openTaskDetail(taskId) {
+  clearError();
+  elements.taskDetailContent.replaceChildren(createDetailLoadingState());
+  elements.taskDetailBackdrop.hidden = false;
+  elements.taskDetailDrawer.hidden = false;
+  document.body.classList.add("is-detail-open");
+  elements.taskDetailClose.focus();
+
+  try {
+    // 详情必须重新按当前 session 查询，不能直接信任历史卡片缓存中的用户或文件数据。
+    const detail = await getImageTask(taskId);
+    renderTaskDetail(detail);
+  } catch (error) {
+    const message = document.createElement("p");
+
+    message.className = "task-detail-error";
+    message.textContent = error instanceof Error ? error.message : "任务详情加载失败。";
+    elements.taskDetailContent.replaceChildren(message);
+  }
+}
+
+function closeTaskDetail() {
+  elements.taskDetailBackdrop.hidden = true;
+  elements.taskDetailDrawer.hidden = true;
+  document.body.classList.remove("is-detail-open");
+}
+
+function createDetailLoadingState() {
+  const loading = document.createElement("p");
+
+  loading.className = "empty-text";
+  loading.textContent = "任务详情加载中...";
+
+  return loading;
+}
+
+function renderTaskDetail(detail) {
+  const task = detail.task;
+  const summary = document.createElement("section");
+  const summaryGrid = document.createElement("div");
+
+  summary.className = "task-detail-section";
+  summaryGrid.className = "task-detail-grid";
+  summary.append(createDetailHeading("任务状态"), summaryGrid);
+  appendDetailValue(summaryGrid, "任务编号", task.id);
+  appendDetailValue(summaryGrid, "任务类型", formatTaskType(task.task_type));
+  appendDetailValue(summaryGrid, "当前状态", formatTaskStatus(task.status));
+  appendDetailValue(summaryGrid, "消耗积分", formatTaskPoints(task));
+  appendDetailValue(summaryGrid, "创建时间", formatDateTime(task.created_at));
+  appendDetailValue(summaryGrid, "更新时间", formatDateTime(task.updated_at));
+
+  const parameters = document.createElement("section");
+  const parameterGrid = document.createElement("div");
+
+  parameters.className = "task-detail-section";
+  parameterGrid.className = "task-detail-grid";
+  parameters.append(createDetailHeading("输入参数"), parameterGrid);
+  appendDetailValue(parameterGrid, "提示词", task.prompt ?? "未填写", true);
+  appendDetailValue(parameterGrid, "反向提示词", task.negative_prompt ?? "未填写", true);
+  appendDetailValue(parameterGrid, "风格 / 操作", task.style_preset_id ?? "默认");
+  appendDetailValue(parameterGrid, "模型", task.gateway_model_code ?? "未记录");
+  appendDetailValue(parameterGrid, "质量档位", task.quality ?? "默认");
+  appendDetailValue(parameterGrid, "尺寸", task.image_size ?? "由原图决定");
+  appendDetailValue(parameterGrid, "数量", String(task.image_count));
+  appendDetailValue(
+    parameterGrid,
+    "高清倍率",
+    task.upscale_factor === null ? "不适用" : `${String(task.upscale_factor)}x`
+  );
+
+  const inputFiles = createDetailFilesSection("输入文件", detail.input_files ?? [], "输入图片");
+  const outputResults = createOutputResultsSection(detail);
+  const statusSection = createStatusDetailSection(task);
+
+  elements.taskDetailContent.replaceChildren(
+    summary,
+    parameters,
+    inputFiles,
+    outputResults,
+    statusSection
+  );
+}
+
+function createDetailHeading(text) {
+  const heading = document.createElement("h3");
+
+  heading.textContent = text;
+  return heading;
+}
+
+function appendDetailValue(grid, label, value, fullWidth = false) {
+  const item = document.createElement("div");
+  const term = document.createElement("span");
+  const description = document.createElement("strong");
+
+  item.className = "task-detail-value";
+  item.classList.toggle("is-wide", fullWidth);
+  term.textContent = label;
+  description.textContent = value;
+  item.append(term, description);
+  grid.append(item);
+}
+
+function createDetailFilesSection(title, files, imageAlt) {
+  const section = document.createElement("section");
+  const grid = document.createElement("div");
+
+  section.className = "task-detail-section";
+  grid.className = "task-detail-files";
+  section.append(createDetailHeading(title));
+
+  if (files.length === 0) {
+    grid.append(createDetailEmptyText("无文件"));
+  } else {
+    for (const file of files) {
+      grid.append(createDetailFileCard(file, imageAlt));
+    }
+  }
+
+  section.append(grid);
+  return section;
+}
+
+function createDetailFileCard(file, imageAlt) {
+  const card = document.createElement("article");
+  const image = document.createElement("img");
+  const name = document.createElement("strong");
+  const meta = document.createElement("small");
+  const download = document.createElement("a");
+
+  card.className = "task-detail-file";
+  image.alt = imageAlt;
+  image.src = file.preview_url;
+  name.textContent = file.file.original_name ?? file.file.id;
+  meta.textContent = formatFileMeta(file.file);
+  download.href = file.download_url;
+  download.target = "_blank";
+  download.rel = "noreferrer";
+  download.textContent = "下载";
+  card.append(image, name, meta, download);
+
+  return card;
+}
+
+function createOutputResultsSection(detail) {
+  const section = createDetailFilesSection("输出结果", detail.result_files ?? [], "任务输出图片");
+  const textResult = detail.task.text_result;
+
+  if (textResult !== null && textResult.length > 0) {
+    const text = document.createElement("pre");
+
+    text.className = "task-detail-text-result";
+    text.textContent = textResult;
+    section.append(text);
+  }
+
+  if (
+    (detail.result_files ?? []).length === 0 &&
+    (textResult === null || textResult.length === 0)
+  ) {
+    section
+      .querySelector(".task-detail-files")
+      .replaceChildren(createDetailEmptyText("暂无输出结果"));
+  }
+
+  return section;
+}
+
+function createStatusDetailSection(task) {
+  const section = document.createElement("section");
+  const grid = document.createElement("div");
+
+  section.className = "task-detail-section";
+  grid.className = "task-detail-grid";
+  section.append(createDetailHeading("状态和错误信息"), grid);
+  appendDetailValue(grid, "状态", formatTaskStatus(task.status));
+  appendDetailValue(grid, "错误码", task.error_code ?? "无");
+  appendDetailValue(
+    grid,
+    "失败原因",
+    task.status === "failed" || task.status === "billing_pending"
+      ? resolveTaskFailureMessage(task)
+      : "无",
+    true
+  );
+
+  return section;
+}
+
+function createDetailEmptyText(text) {
+  const empty = document.createElement("p");
+
+  empty.className = "empty-text";
+  empty.textContent = text;
+  return empty;
+}
+
+function formatDateTime(value) {
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function formatFileMeta(file) {
+  const dimensions =
+    file.width === null || file.height === null
+      ? "尺寸未知"
+      : `${String(file.width)} x ${String(file.height)}`;
+  const size = `${(file.size_bytes / 1024).toFixed(1)} KB`;
+
+  return `${dimensions} · ${size}`;
 }
 
 async function runHistoryAction(button, pendingText, action) {

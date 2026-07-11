@@ -146,7 +146,7 @@ export class ImageGenerationWorkerService {
         error_code: errorCode,
         error_message: message
       });
-      return await this.failTask(task, errorCode, message);
+      return await this.failTask(task, errorCode, resolvePublicWorkerErrorMessage(errorCode));
     }
   }
 
@@ -344,7 +344,7 @@ export class ImageGenerationWorkerService {
         // 审计日志属于旁路能力，写入失败不能阻断任务失败流转和预占积分释放。
       }
 
-      return await this.failTask(task, errorCode, message);
+      return await this.failTask(task, errorCode, resolvePublicWorkerErrorMessage(errorCode));
     }
   }
 
@@ -429,7 +429,11 @@ export class ImageGenerationWorkerService {
         error_code: "AI_GATEWAY_FAILED",
         error_message: message
       });
-      return await this.failTask(task, "AI_GATEWAY_FAILED", message);
+      return await this.failTask(
+        task,
+        "AI_GATEWAY_FAILED",
+        resolvePublicWorkerErrorMessage("AI_GATEWAY_FAILED")
+      );
     }
   }
 
@@ -447,6 +451,15 @@ export class ImageGenerationWorkerService {
       errorMessage: message
     });
   }
+}
+
+function resolvePublicWorkerErrorMessage(errorCode: string): string {
+  // Provider 原始异常只写审计日志；任务记录使用稳定中文原因，避免向前端暴露英文内部错误。
+  if (errorCode === "FILE_STORAGE_FAILED" || errorCode === "IMAGE_DIMENSIONS_MISMATCH") {
+    return "结果文件保存失败，请稍后重试。";
+  }
+
+  return "AI 模型服务调用失败，请稍后重试。";
 }
 
 function buildImageEditPrompt(prompt: string | null, editMode: string | null): string {
