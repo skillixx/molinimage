@@ -29,6 +29,8 @@ export interface CreateImageTaskRequest {
   sourceTaskId?: string;
   idempotencyKey?: string;
   entitlementId?: number;
+  expectedPricingRuleId?: string | null;
+  expectedPoints?: string;
 }
 
 export interface TransitionImageTaskRequest {
@@ -282,7 +284,11 @@ export class ImageTaskService {
             quality: quality ?? undefined,
             imageSize: imageSize ?? undefined,
             upscaleFactor: upscaleFactor ?? undefined,
+            gatewayModelCode: gatewayModelCode ?? undefined,
+            gatewayCapability: gatewayCapability ?? undefined,
             entitlementId: entitlementId ?? undefined,
+            expectedRuleId: request.expectedPricingRuleId,
+            expectedPoints: request.expectedPoints,
             idempotencyKey: reserveIdempotencyKey
           });
     const task = await this.repository.create({

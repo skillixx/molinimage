@@ -12,7 +12,8 @@ const requiredTables = [
   "billing_events",
   "ai_gateway_call_logs",
   "style_presets",
-  "user_collections"
+  "user_collections",
+  "pricing_rules"
 ];
 const requiredIndexes = [
   "uk_image_tasks_idempotency_key",
@@ -26,7 +27,9 @@ const requiredIndexes = [
   "idx_ai_gateway_call_logs_task_id",
   "idx_files_owner_created",
   "uk_user_collections_owner_task",
-  "idx_user_collections_owner_created"
+  "idx_user_collections_owner_created",
+  "idx_pricing_rules_task_active",
+  "idx_pricing_rules_capability_active"
 ];
 
 void test("基础表 migration 包含 P1-G02 要求的表、引擎、字符集和关键索引", async () => {
@@ -49,7 +52,7 @@ void test("SQL 拆分器能按语句执行 migration 文件", async () => {
   const statements = splitSqlStatements(sql);
 
   // 每张基础表各一条 CREATE TABLE，保证迁移执行器不会依赖 multiStatements。
-  assert.equal(statements.length, requiredTables.length);
+  assert.equal(statements.length, 6);
   assert.ok(statements.every((statement) => /CREATE TABLE IF NOT EXISTS/i.test(statement)));
 });
 
@@ -105,6 +108,43 @@ void test("历史任务权益 migration 从预占计费事件回填权益 ID", a
   assert.match(sql, /billing_event\.id = image_task\.billing_event_id/i);
   assert.match(sql, /SET image_task\.entitlement_id = billing_event\.moling_entitlement_id/i);
   assert.match(sql, /billing_event\.event_type = 'reserve'/i);
+});
+
+void test("价格规则 migration 覆盖任务、模型能力、质量、尺寸和启用状态", async () => {
+  const upSql = await readFile(resolve("migrations", "007_create_pricing_rules.up.sql"), "utf8");
+  const downSql = await readFile(
+    resolve("migrations", "007_create_pricing_rules.down.sql"),
+    "utf8"
+  );
+
+  for (const field of [
+    "task_type",
+    "gateway_model_code",
+    "gateway_capability",
+    "quality",
+    "image_size",
+    "points_per_unit",
+    "active"
+  ]) {
+    assert.match(upSql, new RegExp(field, "i"));
+  }
+
+  assert.match(downSql, /DROP TABLE IF EXISTS pricing_rules/i);
+});
+
+void test("价格规则维度 migration 禁止重复匹配规则", async () => {
+  const upSql = await readFile(
+    resolve("migrations", "008_add_pricing_rule_dimension_key.up.sql"),
+    "utf8"
+  );
+  const downSql = await readFile(
+    resolve("migrations", "008_add_pricing_rule_dimension_key.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /GENERATED ALWAYS AS/i);
+  assert.match(upSql, /uk_pricing_rules_task_dimensions/i);
+  assert.match(downSql, /DROP INDEX uk_pricing_rules_task_dimensions/i);
 });
 
 async function readAllUpMigrations(): Promise<string> {

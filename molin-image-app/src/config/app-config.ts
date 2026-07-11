@@ -19,6 +19,7 @@ export interface AppConfig {
   billingRulesJson: string;
   billingMockBalancePoints: string;
   internalApiToken: string;
+  adminUserIds?: number[];
   sessionCookieName: string;
   sessionCookieSecure: boolean;
   sessionTtlSeconds: number;
@@ -62,7 +63,8 @@ type OptionalEnvKey =
   | "IMAGE_MODEL_REQUIRED_CAPABILITIES"
   | "BILLING_RULES_JSON"
   | "BILLING_MOCK_BALANCE_POINTS"
-  | "AI_GATEWAY_API_KEY";
+  | "AI_GATEWAY_API_KEY"
+  | "MOLINIMAGE_ADMIN_USER_IDS";
 
 type AppEnv = Partial<Record<RequiredEnvKey | OptionalEnvKey, string>>;
 
@@ -111,6 +113,7 @@ export function loadAppConfig(env: AppEnv = process.env): AppConfig {
     ),
     billingMockBalancePoints: readOptionalText(env.BILLING_MOCK_BALANCE_POINTS, "1000000"),
     internalApiToken: readRequiredEnv(env, "INTERNAL_API_TOKEN"),
+    adminUserIds: readPositiveIntegerList(env.MOLINIMAGE_ADMIN_USER_IDS),
     sessionCookieName: readOptionalText(env.SESSION_COOKIE_NAME, "molinimage_session"),
     sessionCookieSecure: readSessionCookieSecure(env),
     sessionTtlSeconds: readPositiveInteger(
@@ -173,6 +176,16 @@ function readCsvList(value: string | undefined, defaultValue: string): string[] 
     .split(",")
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function readPositiveIntegerList(value: string | undefined): number[] {
+  if (value === undefined || value.trim().length === 0) {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((item) => readPositiveInteger(item.trim(), "MOLINIMAGE_ADMIN_USER_IDS"));
 }
 
 function readSessionCookieSecure(env: AppEnv): boolean {

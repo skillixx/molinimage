@@ -58,6 +58,7 @@ const state = {
   mode: "text_to_image",
   models: [],
   estimate: null,
+  estimateRequestId: 0,
   isSubmitting: false,
   referenceFileId: null,
   referencePreviewUrl: null,
@@ -86,6 +87,8 @@ const elements = {
   upscaleFactorField: document.querySelector("#upscaleFactorField"),
   upscaleFactorSelect: document.querySelector("#upscaleFactorSelect"),
   modelSelect: document.querySelector("#modelSelect"),
+  qualityField: document.querySelector("#qualityField"),
+  qualitySelect: document.querySelector("#qualitySelect"),
   sizeField: document.querySelector("#sizeField"),
   sizeSelect: document.querySelector("#sizeSelect"),
   countField: document.querySelector("#countField"),
@@ -115,6 +118,12 @@ elements.countSelect.addEventListener("change", () => {
   void refreshEstimate();
 });
 elements.upscaleFactorSelect.addEventListener("change", () => {
+  void refreshEstimate();
+});
+elements.modelSelect.addEventListener("change", () => {
+  void refreshEstimate();
+});
+elements.qualitySelect.addEventListener("change", () => {
   void refreshEstimate();
 });
 elements.primaryAction.addEventListener("click", () => {
@@ -196,6 +205,7 @@ function renderMode() {
   elements.restoreTypeField.hidden = state.mode !== "image_restore";
   elements.upscaleFactorField.hidden = state.mode !== "upscale";
   elements.sizeField.hidden = state.mode === "upscale";
+  elements.qualityField.hidden = state.mode === "image_to_text" || state.mode === "upscale";
   elements.countField.hidden = state.mode === "upscale";
   elements.sizeSelect.disabled = state.mode === "image_to_text";
   elements.countSelect.disabled = state.mode === "image_to_text";
@@ -218,6 +228,8 @@ function renderMode() {
 }
 
 async function refreshEstimate() {
+  // 只允许最后一次请求更新估价，避免用户快速切换参数时旧响应覆盖新价格。
+  const requestId = ++state.estimateRequestId;
   state.estimate = null;
   elements.estimatePoints.textContent = "--";
   elements.estimateBalance.textContent = "余额校验中";
@@ -233,8 +245,18 @@ async function refreshEstimate() {
           ? undefined
           : elements.sizeSelect.value,
       upscale_factor:
-        state.mode === "upscale" ? Number(elements.upscaleFactorSelect.value) : undefined
+        state.mode === "upscale" ? Number(elements.upscaleFactorSelect.value) : undefined,
+      gateway_model_code: elements.modelSelect.value || undefined,
+      gateway_capability: modeConfig[state.mode].capability,
+      quality:
+        state.mode === "image_to_text" || state.mode === "upscale"
+          ? undefined
+          : elements.qualitySelect.value
     });
+
+    if (requestId !== state.estimateRequestId) {
+      return;
+    }
 
     state.estimate = estimate;
     elements.estimatePoints.textContent = `${estimate.estimated_points} ${estimate.unit}`;
@@ -244,12 +266,27 @@ async function refreshEstimate() {
     elements.estimateStrip.dataset.tone = estimate.enough_balance ? "ready" : "warning";
     updatePrimaryActionState();
   } catch (error) {
+    if (requestId !== state.estimateRequestId) {
+      return;
+    }
+
     state.estimate = null;
     elements.estimatePoints.textContent = "--";
     elements.estimateBalance.textContent = error instanceof Error ? error.message : "计费估算失败";
     elements.estimateStrip.dataset.tone = "warning";
     updatePrimaryActionState();
   }
+}
+
+async function handleTaskSubmitError(error, fallbackMessage) {
+  renderProgress("failed");
+
+  if (error?.code === "BILLING_PRICE_CHANGED") {
+    // 后台调价后立即获取新价格，防止用户携带旧估价反复提交失败。
+    await refreshEstimate();
+  }
+
+  showError(error instanceof Error ? error.message : fallbackMessage);
 }
 
 async function submitCurrentTask() {
@@ -302,10 +339,12 @@ async function submitTextToImageTask() {
 
   try {
     const result = await createImageTask({
+      ...currentPricingExpectation(),
       task_type: "text_to_image",
       prompt,
       gateway_model_code: modelCode,
       gateway_capability: "image_generation",
+      quality: elements.qualitySelect.value,
       image_size: elements.sizeSelect.value,
       image_count: Number(elements.countSelect.value)
     });
@@ -315,8 +354,7 @@ async function submitTextToImageTask() {
     elements.actionHint.textContent = `任务 ${result.task.id} 已完成`;
     await Promise.all([refreshEstimate(), refreshHistory()]);
   } catch (error) {
-    renderProgress("failed");
-    showError(error instanceof Error ? error.message : "文生图任务提交失败。");
+    await handleTaskSubmitError(error, "文生图任务提交失败。");
   } finally {
     setSubmitting(false);
   }
@@ -350,6 +388,7 @@ async function submitImageToTextTask() {
     });
     renderProgress("generating");
     const result = await createImageTask({
+      ...currentPricingExpectation(),
       task_type: "image_to_text",
       prompt: elements.promptInput.value.trim(),
       input_file_ids: [uploaded.file.id],
@@ -363,8 +402,7 @@ async function submitImageToTextTask() {
     elements.actionHint.textContent = `任务 ${result.task.id} 已完成`;
     await Promise.all([refreshEstimate(), refreshHistory()]);
   } catch (error) {
-    renderProgress("failed");
-    showError(error instanceof Error ? error.message : "图生文任务提交失败。");
+    await handleTaskSubmitError(error, "图生文任务提交失败。");
   } finally {
     setSubmitting(false);
   }
@@ -416,12 +454,14 @@ async function submitImageToImageTask() {
 
     renderProgress("generating");
     const result = await createImageTask({
+      ...currentPricingExpectation(),
       task_type: "image_to_image",
       prompt,
       style_preset_id: elements.editModeSelect.value,
       input_file_ids: [inputFileId],
       gateway_model_code: modelCode,
       gateway_capability: "image_edit",
+      quality: elements.qualitySelect.value,
       image_size: elements.sizeSelect.value,
       image_count: Number(elements.countSelect.value),
       source_task_id: state.sourceTaskId
@@ -432,8 +472,7 @@ async function submitImageToImageTask() {
     elements.actionHint.textContent = `任务 ${result.task.id} 已完成`;
     await Promise.all([refreshEstimate(), refreshHistory()]);
   } catch (error) {
-    renderProgress("failed");
-    showError(error instanceof Error ? error.message : "图生图任务提交失败。");
+    await handleTaskSubmitError(error, "图生图任务提交失败。");
   } finally {
     setSubmitting(false);
   }
@@ -473,12 +512,14 @@ async function submitImageRestoreTask() {
 
     renderProgress("generating");
     const result = await createImageTask({
+      ...currentPricingExpectation(),
       task_type: "image_restore",
       prompt: elements.promptInput.value.trim(),
       style_preset_id: elements.restoreTypeSelect.value,
       input_file_ids: [uploaded.file.id],
       gateway_model_code: modelCode,
       gateway_capability: "image_edit",
+      quality: elements.qualitySelect.value,
       image_size: elements.sizeSelect.value,
       image_count: Number(elements.countSelect.value)
     });
@@ -488,8 +529,7 @@ async function submitImageRestoreTask() {
     elements.actionHint.textContent = `修复任务 ${result.task.id} 已完成`;
     await Promise.all([refreshEstimate(), refreshHistory()]);
   } catch (error) {
-    renderProgress("failed");
-    showError(error instanceof Error ? error.message : "图片修复任务提交失败。");
+    await handleTaskSubmitError(error, "图片修复任务提交失败。");
   } finally {
     setSubmitting(false);
   }
@@ -530,6 +570,7 @@ async function submitUpscaleTask() {
 
     renderProgress("generating");
     const result = await createImageTask({
+      ...currentPricingExpectation(),
       task_type: "upscale",
       upscale_factor: upscaleFactor,
       input_file_ids: [uploaded.file.id],
@@ -543,8 +584,7 @@ async function submitUpscaleTask() {
     elements.actionHint.textContent = `放大任务 ${result.task.id} 已完成`;
     await Promise.all([refreshEstimate(), refreshHistory()]);
   } catch (error) {
-    renderProgress("failed");
-    showError(error instanceof Error ? error.message : "高清放大任务提交失败。");
+    await handleTaskSubmitError(error, "高清放大任务提交失败。");
   } finally {
     setSubmitting(false);
   }
@@ -561,6 +601,13 @@ function confirmHighConsumptionTask(operationLabel) {
   return window.confirm(
     `${confirmationLabel}，预计消耗 ${estimatedPoints} 积分并生成 ${outputCount} 张结果。确认继续吗？`
   );
+}
+
+function currentPricingExpectation() {
+  return {
+    expected_price_rule_id: state.estimate?.rule_id ?? null,
+    expected_points: state.estimate?.estimated_points
+  };
 }
 
 function setSubmitting(isSubmitting, message = "") {

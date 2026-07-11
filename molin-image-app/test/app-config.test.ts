@@ -55,6 +55,7 @@ void test("配置完整时可以加载应用配置", () => {
       '[{"task_type":"text_to_image","usage_type":"image_text_to_image","unit":"credits","points_per_unit":"6","active":true}]',
     billingMockBalancePoints: "100",
     internalApiToken: "replace_with_internal_api_token",
+    adminUserIds: [],
     sessionCookieName: "molinimage_session",
     sessionCookieSecure: false,
     sessionTtlSeconds: 86400,
@@ -86,4 +87,10 @@ void test("墨灵应用 ID 非法时启动失败", () => {
     () => loadAppConfig({ ...completeEnv, MOLING_APP_ID: "abc" }),
     /MOLING_APP_ID 必须是正整数/
   );
+});
+
+void test("管理员用户白名单支持多个墨灵用户 ID", () => {
+  const config = loadAppConfig({ ...completeEnv, MOLINIMAGE_ADMIN_USER_IDS: "696,479" });
+
+  assert.deepEqual(config.adminUserIds, [696, 479]);
 });

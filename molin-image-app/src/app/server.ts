@@ -15,10 +15,13 @@ import { MySqlBillingEventsRepository } from "../infrastructure/database/billing
 import { createDatabasePool } from "../infrastructure/database/database-pool.js";
 import { MySqlFilesRepository } from "../infrastructure/database/files-repository.js";
 import { MySqlImageTasksRepository } from "../infrastructure/database/image-tasks-repository.js";
+import { MySqlPricingRulesRepository } from "../infrastructure/database/pricing-rules-repository.js";
 import { MolingClient } from "../infrastructure/moling/moling-client.js";
 import { MinioStorageService } from "../infrastructure/storage/minio-storage-service.js";
 import { BillingService } from "../modules/billing/billing-service.js";
+import { PricingRuleService } from "../modules/billing/pricing-rule-service.js";
 import { ConsoleImageTaskAuditLogger } from "../infrastructure/audit/console-image-task-audit-logger.js";
+import { ConsolePricingRuleAuditLogger } from "../infrastructure/audit/console-pricing-rule-audit-logger.js";
 import { FileService } from "../modules/files/file-service.js";
 import { ImageModelService } from "../modules/image-models/image-model-service.js";
 import { ImageTaskService } from "../modules/image-tasks/image-task-service.js";
@@ -30,14 +33,18 @@ const databasePool = createDatabasePool(config);
 const filesRepository = new MySqlFilesRepository(databasePool);
 const imageTasksRepository = new MySqlImageTasksRepository(databasePool);
 const billingEventsRepository = new MySqlBillingEventsRepository(databasePool);
+const pricingRulesRepository = new MySqlPricingRulesRepository(databasePool);
 const aiGatewayCallLogsRepository = new MySqlAiGatewayCallLogsRepository(databasePool);
 const storageService = new MinioStorageService(config);
 const fileService = new FileService(filesRepository, storageService, config);
 const billingService = new BillingService(
   config.billingRulesJson,
   billingEventsRepository,
-  molingClient
+  molingClient,
+  pricingRulesRepository
 );
+const pricingRuleAuditLogger = new ConsolePricingRuleAuditLogger();
+const pricingRuleService = new PricingRuleService(pricingRulesRepository, pricingRuleAuditLogger);
 const imageTaskAuditLogger = new ConsoleImageTaskAuditLogger();
 const imageTaskService = new ImageTaskService(
   imageTasksRepository,
@@ -70,6 +77,7 @@ const server = createServer(
     imageModelService,
     imageTaskService,
     billingService,
+    pricingRuleService,
     imageGenerationWorkerService
   })
 );

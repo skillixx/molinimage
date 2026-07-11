@@ -8,6 +8,7 @@ import type {
   CompleteSettleBillingEventInput,
   CreateReservedBillingEventInput
 } from "../src/infrastructure/database/billing-events-repository.js";
+import type { PricingRuleRecord } from "../src/infrastructure/database/pricing-rules-repository.js";
 import {
   BillingService,
   BillingServiceError,
@@ -51,15 +52,15 @@ const rulesJson = JSON.stringify([
   }
 ]);
 
-void test("计费估算会按任务参数变化重新计算预计积分", () => {
+void test("计费估算会按任务参数变化重新计算预计积分", async () => {
   const service = createBillingService("100");
 
-  const oneImage = service.estimate({
+  const oneImage = await service.estimate({
     ownerUserId: 479,
     taskType: "text_to_image",
     imageCount: 1
   });
-  const threeImages = service.estimate({
+  const threeImages = await service.estimate({
     ownerUserId: 479,
     taskType: "text_to_image",
     imageCount: 3
@@ -70,16 +71,16 @@ void test("计费估算会按任务参数变化重新计算预计积分", () => 
   assert.equal(threeImages.enough_balance, true);
 });
 
-void test("高清放大 2x 和 4x 使用不同价格规则", () => {
+void test("高清放大 2x 和 4x 使用不同价格规则", async () => {
   const service = createBillingService("100");
 
-  const twoTimes = service.estimate({
+  const twoTimes = await service.estimate({
     ownerUserId: 479,
     taskType: "upscale",
     imageCount: 1,
     upscaleFactor: 2
   });
-  const fourTimes = service.estimate({
+  const fourTimes = await service.estimate({
     ownerUserId: 479,
     taskType: "upscale",
     imageCount: 1,
@@ -90,6 +91,140 @@ void test("高清放大 2x 和 4x 使用不同价格规则", () => {
   assert.equal(twoTimes.estimated_points, "4");
   assert.equal(fourTimes.unit_points, "8");
   assert.equal(fourTimes.estimated_points, "8");
+});
+
+void test("数据库具体价格规则按能力、质量和尺寸覆盖默认规则", async () => {
+  const service = new BillingService(
+    rulesJson,
+    new InMemoryBillingEventsRepository(),
+    new MockEntitlementReserveGateway("100"),
+    createPricingRuleProvider([
+      createPricingRule("price_default", { points_per_unit: "6" }),
+      createPricingRule("price_hd", {
+        gateway_capability: "image_generation",
+        quality: "hd",
+        image_size: "1024x1536",
+        points_per_unit: "10"
+      })
+    ])
+  );
+
+  const specific = await service.estimate({
+    ownerUserId: 479,
+    taskType: "text_to_image",
+    gatewayCapability: "image_generation",
+    quality: "hd",
+    imageSize: "1024x1536"
+  });
+  const fallback = await service.estimate({
+    ownerUserId: 479,
+    taskType: "text_to_image",
+    gatewayCapability: "image_generation",
+    quality: "standard",
+    imageSize: "1024x1024"
+  });
+
+  assert.equal(specific.unit_points, "10");
+  assert.equal(specific.rule_id, "price_hd");
+  assert.equal(specific.rule_source, "database");
+  assert.equal(fallback.unit_points, "6");
+  assert.equal(fallback.rule_id, "price_default");
+});
+
+void test("禁用具体规则后回退默认规则，无启用默认规则时禁止估算", async () => {
+  const repository = new InMemoryBillingEventsRepository();
+  const service = new BillingService(
+    rulesJson,
+    repository,
+    new MockEntitlementReserveGateway("100"),
+    createPricingRuleProvider([
+      createPricingRule("price_default", { points_per_unit: "6" }),
+      createPricingRule("price_hd", {
+        quality: "hd",
+        points_per_unit: "10",
+        active: false
+      })
+    ])
+  );
+
+  assert.equal(
+    (await service.estimate({ ownerUserId: 479, taskType: "text_to_image", quality: "hd" }))
+      .unit_points,
+    "6"
+  );
+
+  const disabledService = new BillingService(
+    rulesJson,
+    repository,
+    new MockEntitlementReserveGateway("100"),
+    createPricingRuleProvider([
+      createPricingRule("price_default", { points_per_unit: "6", active: false })
+    ])
+  );
+  await assert.rejects(
+    () => disabledService.estimate({ ownerUserId: 479, taskType: "text_to_image" }),
+    (error: unknown) =>
+      error instanceof BillingServiceError && error.code === "BILLING_RULE_NOT_FOUND"
+  );
+});
+
+void test("估价后规则变化会在预占前拒绝，不产生计费事件", async () => {
+  const repository = new InMemoryBillingEventsRepository();
+  let currentRules = [createPricingRule("price_default", { points_per_unit: "6" })];
+  const service = new BillingService(
+    rulesJson,
+    repository,
+    new MockEntitlementReserveGateway("100"),
+    { listAll: () => Promise.resolve(currentRules) }
+  );
+  const estimate = await service.estimate({ ownerUserId: 479, taskType: "text_to_image" });
+
+  currentRules = [createPricingRule("price_default", { points_per_unit: "8" })];
+  await assert.rejects(
+    () =>
+      service.reserve({
+        ownerUserId: 479,
+        taskId: "task_price_changed",
+        taskType: "text_to_image",
+        idempotencyKey: "task_price_changed:reserve",
+        expectedRuleId: estimate.rule_id,
+        expectedPoints: estimate.estimated_points
+      }),
+    (error: unknown) =>
+      error instanceof BillingServiceError && error.code === "BILLING_PRICE_CHANGED"
+  );
+  assert.equal(repository.events.length, 0);
+});
+
+void test("多个计费服务实例通过共享规则源立即读取最新价格", async () => {
+  let currentRules = [createPricingRule("price_default", { points_per_unit: "6" })];
+  const provider = { listAll: () => Promise.resolve(currentRules) };
+  const first = new BillingService(
+    rulesJson,
+    new InMemoryBillingEventsRepository(),
+    new MockEntitlementReserveGateway("100"),
+    provider
+  );
+  const second = new BillingService(
+    rulesJson,
+    new InMemoryBillingEventsRepository(),
+    new MockEntitlementReserveGateway("100"),
+    provider
+  );
+
+  assert.equal(
+    (await first.estimate({ ownerUserId: 479, taskType: "text_to_image" })).unit_points,
+    "6"
+  );
+  currentRules = [createPricingRule("price_default", { points_per_unit: "9" })];
+  assert.equal(
+    (await second.estimate({ ownerUserId: 479, taskType: "text_to_image" })).unit_points,
+    "9"
+  );
+  assert.equal(
+    (await first.estimate({ ownerUserId: 479, taskType: "text_to_image" })).unit_points,
+    "9"
+  );
 });
 
 void test("预占计费事件具备稳定幂等键并落库", async () => {
@@ -427,4 +562,32 @@ class FlakySettleGateway extends MockEntitlementReserveGateway {
 
     return super.settle(input);
   }
+}
+
+function createPricingRule(
+  id: string,
+  overrides: Partial<PricingRuleRecord> = {}
+): PricingRuleRecord {
+  return {
+    id,
+    task_type: "text_to_image",
+    gateway_model_code: null,
+    gateway_capability: null,
+    quality: null,
+    image_size: null,
+    upscale_factor: null,
+    usage_type: "image_text_to_image",
+    unit: "credits",
+    points_per_unit: "6",
+    active: true,
+    created_at: "2026-07-11T00:00:00.000Z",
+    updated_at: "2026-07-11T00:00:00.000Z",
+    ...overrides
+  };
+}
+
+function createPricingRuleProvider(rules: PricingRuleRecord[]) {
+  return {
+    listAll: () => Promise.resolve(rules)
+  };
 }

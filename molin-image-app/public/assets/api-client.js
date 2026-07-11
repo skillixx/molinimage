@@ -70,7 +70,11 @@ async function requestJson(path, options = {}) {
 
   if (!response.ok) {
     const message = payload?.error?.message ?? "请求失败，请稍后重试。";
-    throw new Error(message);
+    const error = new Error(message);
+
+    // 保留后端公开错误码，工作台可据此执行重新估价等安全恢复动作。
+    error.code = payload?.error?.code ?? "REQUEST_FAILED";
+    throw error;
   }
 
   return payload;

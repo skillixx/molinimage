@@ -107,6 +107,9 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果�
   assert.match(html, /id="sizeField">\s*<span>尺寸<\/span>/);
   assert.match(html, /id="countField">\s*<span>数量<\/span>/);
   assert.match(html, /id="referencePreview"/);
+  assert.match(html, /id="qualitySelect"/);
+  assert.match(html, /value="standard">标准/);
+  assert.match(html, /value="hd">高清/);
   assert.match(html, /id="taskDetailDrawer"/);
   assert.match(html, /id="taskDetailContent"/);
   assert.match(html, /id="taskDetailClose"/);
@@ -135,6 +138,13 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果�
   assert.match(workbench, /confirmHighConsumptionTask/);
   assert.match(workbench, /图片修复属于高消耗任务/);
   assert.match(workbench, /gateway_capability: "image_edit"/);
+  assert.match(workbench, /quality: elements\.qualitySelect\.value/);
+  assert.match(workbench, /expected_price_rule_id: state\.estimate\?\.rule_id/);
+  assert.match(workbench, /expected_points: state\.estimate\?\.estimated_points/);
+  assert.match(workbench, /const requestId = \+\+state\.estimateRequestId/);
+  assert.match(workbench, /requestId !== state\.estimateRequestId/);
+  assert.match(workbench, /error\?\.code === "BILLING_PRICE_CHANGED"/);
+  assert.match(workbench, /await refreshEstimate\(\)/);
   assert.match(workbench, /model\.supported_task_types\.includes\(state\.mode\)/);
   assert.match(workbench, /再次编辑/);
   assert.match(workbench, /useTaskForReedit/);
@@ -199,6 +209,25 @@ void test("任务详情格式化能输出中文失败原因并区分积分状态
     }),
     "6 积分（释放待对账）"
   );
+});
+
+void test("价格管理页覆盖多维规则、编辑和启停操作", async () => {
+  const html = await readFile(resolve("public", "admin-pricing.html"), "utf8");
+  const script = await readFile(resolve("public", "assets", "admin-pricing.js"), "utf8");
+  const apiClient = await readFile(resolve("public", "assets", "admin-pricing-api.js"), "utf8");
+
+  assert.match(html, /价格规则管理/);
+  assert.match(html, /id="ruleCapability"/);
+  assert.match(html, /id="ruleQuality"/);
+  assert.match(html, /id="ruleImageSize"/);
+  assert.match(html, /id="rulePoints"/);
+  assert.match(script, /setPricingRuleActive\(rule\.id, !rule\.active\)/);
+  assert.match(script, /if \(isMutating\) return/);
+  assert.match(script, /window\.confirm/);
+  assert.match(script, /button\.disabled = mutating/);
+  assert.doesNotMatch(script, /\bfetch\(/);
+  assert.match(apiClient, /\/api\/admin\/image\/pricing-rules/);
+  assert.match(apiClient, /method: "PATCH"/);
 });
 
 class FakeLaunchTicketVerifier implements LaunchTicketVerifier {

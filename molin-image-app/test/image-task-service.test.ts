@@ -267,6 +267,12 @@ void test("接入计费服务后，创建图片任务会先预占积分并进入
     taskType: "text_to_image",
     prompt: "一张产品海报",
     imageCount: 2,
+    gatewayModelCode: "image-gen-hd",
+    gatewayCapability: "image_generation",
+    quality: "hd",
+    imageSize: "1024x1536",
+    expectedPricingRuleId: "price_hd",
+    expectedPoints: "12",
     entitlementId: 62
   });
 
@@ -274,6 +280,12 @@ void test("接入计费服务后，创建图片任务会先预占积分并进入
   assert.equal(result.task.cost_points, "12");
   assert.equal(result.task.billing_event_id, "billing_event_001");
   assert.equal(billingService.reserveRequests[0]?.taskId, result.task.id);
+  assert.equal(billingService.reserveRequests[0]?.gatewayModelCode, "image-gen-hd");
+  assert.equal(billingService.reserveRequests[0]?.gatewayCapability, "image_generation");
+  assert.equal(billingService.reserveRequests[0]?.quality, "hd");
+  assert.equal(billingService.reserveRequests[0]?.imageSize, "1024x1536");
+  assert.equal(billingService.reserveRequests[0]?.expectedRuleId, "price_hd");
+  assert.equal(billingService.reserveRequests[0]?.expectedPoints, "12");
   assert.equal(
     billingService.reserveRequests[0]?.idempotencyKey,
     `${result.task.id}:text_to_image:reserve`
@@ -296,6 +308,27 @@ void test("余额不足时图片任务不会写入数据库", async () => {
       error instanceof BillingServiceError && error.code === "BILLING_BALANCE_INSUFFICIENT"
   );
   assert.equal(repository.records.size, 0);
+});
+
+void test("价格规则全部禁用时任务不会写库也不会发起计费预占", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new DisabledPricingBillingService();
+  const service = new ImageTaskService(repository, billingService);
+
+  await assert.rejects(
+    () =>
+      service.createTask({
+        ownerUserId: 479,
+        taskType: "text_to_image",
+        imageCount: 1,
+        entitlementId: 62
+      }),
+    (error: unknown) =>
+      error instanceof BillingServiceError && error.code === "BILLING_RULE_NOT_FOUND"
+  );
+  assert.equal(repository.records.size, 0);
+  assert.equal(billingService.reserveAttempts, 1);
+  assert.equal(billingService.gatewayReserveAttempts, 0);
 });
 
 void test("图片任务状态机允许完整成功链路，并记录结果", async () => {
@@ -877,6 +910,7 @@ class FakeBillingService {
         upscale_factor: request.upscaleFactor ?? null,
         balance_points: "100",
         enough_balance: true,
+        rule_id: null,
         rule_source: "env"
       },
       billing_event: {
@@ -959,5 +993,26 @@ class InsufficientBillingService {
 
   settle(): Promise<SettleBillingResult> {
     return Promise.reject(new Error("余额不足测试不需要结算预占"));
+  }
+}
+
+class DisabledPricingBillingService {
+  reserveAttempts = 0;
+  gatewayReserveAttempts = 0;
+
+  reserve(): Promise<ReserveBillingResult> {
+    this.reserveAttempts += 1;
+    // 价格匹配阶段即拒绝请求，因此不会进入墨灵权益预占调用。
+    return Promise.reject(
+      new BillingServiceError("BILLING_RULE_NOT_FOUND", "当前任务没有可用价格规则。", 409)
+    );
+  }
+
+  release(): Promise<ReleaseBillingResult> {
+    throw new Error("规则禁用时不应释放未发生的预占");
+  }
+
+  settle(): Promise<SettleBillingResult> {
+    throw new Error("规则禁用时不应结算未发生的预占");
   }
 }

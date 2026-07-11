@@ -4,6 +4,10 @@ import type {
   BillingEventRecord,
   BillingEventsRepository
 } from "../../infrastructure/database/billing-events-repository.js";
+import type {
+  PricingRuleRecord,
+  PricingRulesRepository
+} from "../../infrastructure/database/pricing-rules-repository.js";
 
 export interface BillingRule {
   task_type: string;
@@ -11,6 +15,10 @@ export interface BillingRule {
   unit: string;
   points_per_unit: string;
   upscale_factor: number | null;
+  gateway_model_code: string | null;
+  gateway_capability: string | null;
+  quality: string | null;
+  image_size: string | null;
   active: boolean;
 }
 
@@ -21,6 +29,8 @@ export interface EstimateBillingRequest {
   quality?: string;
   imageSize?: string;
   upscaleFactor?: number;
+  gatewayModelCode?: string;
+  gatewayCapability?: string;
 }
 
 export interface BillingEstimateResult {
@@ -33,13 +43,16 @@ export interface BillingEstimateResult {
   upscale_factor: number | null;
   balance_points: string;
   enough_balance: boolean;
-  rule_source: "env";
+  rule_id: string | null;
+  rule_source: "env" | "database";
 }
 
 export interface ReserveBillingRequest extends EstimateBillingRequest {
   taskId: string;
   entitlementId?: number;
   idempotencyKey: string;
+  expectedRuleId?: string | null;
+  expectedPoints?: string;
 }
 
 export interface ReserveBillingResult {
@@ -151,13 +164,14 @@ export class BillingService {
     private readonly repository: BillingEventsRepository,
     private readonly gateway: EntitlementReserveGateway &
       EntitlementReleaseGateway &
-      EntitlementSettleGateway
+      EntitlementSettleGateway,
+    private readonly pricingRulesRepository?: Pick<PricingRulesRepository, "listAll">
   ) {
     this.rules = parseBillingRules(rulesJson);
   }
 
-  estimate(request: EstimateBillingRequest): BillingEstimateResult {
-    const rule = this.findActiveRule(request);
+  async estimate(request: EstimateBillingRequest): Promise<BillingEstimateResult> {
+    const rule = await this.findActiveRule(request);
     const quantity = normalizeQuantity(request.imageCount);
     const estimatedPoints = multiplyDecimal(rule.points_per_unit, quantity);
     const balancePoints =
@@ -166,9 +180,6 @@ export class BillingService {
         : estimatedPoints;
 
     void request.ownerUserId;
-    void request.quality;
-    void request.imageSize;
-
     return {
       task_type: rule.task_type,
       usage_type: rule.usage_type,
@@ -179,12 +190,26 @@ export class BillingService {
       upscale_factor: rule.upscale_factor,
       balance_points: balancePoints,
       enough_balance: compareDecimal(balancePoints, estimatedPoints) >= 0,
-      rule_source: "env"
+      rule_id: "id" in rule ? rule.id : null,
+      rule_source: "id" in rule ? "database" : "env"
     };
   }
 
   async reserve(request: ReserveBillingRequest): Promise<ReserveBillingResult> {
-    const estimate = this.estimate(request);
+    const estimate = await this.estimate(request);
+
+    if (
+      (request.expectedRuleId !== undefined && request.expectedRuleId !== estimate.rule_id) ||
+      (request.expectedPoints !== undefined &&
+        compareDecimal(request.expectedPoints, estimate.estimated_points) !== 0)
+    ) {
+      // 用户确认的估价与当前规则不一致时拒绝预占，防止管理端调价后静默按新价扣费。
+      throw new BillingServiceError(
+        "BILLING_PRICE_CHANGED",
+        "价格已更新，请确认最新积分后重新提交。",
+        409
+      );
+    }
 
     if (!estimate.enough_balance) {
       // 余额不足必须在任务入队和 AI 调用前拦截，避免用户无额度时产生上游成本。
@@ -386,15 +411,19 @@ export class BillingService {
     }
   }
 
-  private findActiveRule(request: EstimateBillingRequest): BillingRule {
+  private async findActiveRule(
+    request: EstimateBillingRequest
+  ): Promise<BillingRule | PricingRuleRecord> {
     const normalizedTaskType = request.taskType.trim();
     const upscaleFactor = normalizeUpscaleFactor(normalizedTaskType, request.upscaleFactor);
-    const rule = this.rules.find(
-      (item) =>
-        item.task_type === normalizedTaskType &&
-        item.active &&
-        item.upscale_factor === upscaleFactor
-    );
+    // 每次估算从 MySQL 获取规则，保证多 API 实例和后续预占看到同一份最新价格。
+    const managedRules = (await this.pricingRulesRepository?.listAll()) ?? [];
+    const managedTaskRules = managedRules.filter((item) => item.task_type === normalizedTaskType);
+    const candidateRules = managedTaskRules.length > 0 ? managedTaskRules : this.rules;
+    const rule = candidateRules
+      .filter((item) => item.active && ruleMatchesRequest(item, request, upscaleFactor))
+      .sort((left, right) => ruleSpecificity(right) - ruleSpecificity(left))
+      .at(0);
 
     if (rule === undefined) {
       throw new BillingServiceError("BILLING_RULE_NOT_FOUND", "当前任务类型未配置计费规则。", 400);
@@ -491,9 +520,44 @@ function parseBillingRules(rulesJson: string): BillingRule[] {
       unit: readRuleString(item, "unit"),
       points_per_unit: normalizeDecimal(readRuleString(item, "points_per_unit")),
       upscale_factor: parseRuleUpscaleFactor(item),
+      gateway_model_code: readOptionalRuleString(item, "gateway_model_code"),
+      gateway_capability: readOptionalRuleString(item, "gateway_capability"),
+      quality: readOptionalRuleString(item, "quality"),
+      image_size: readOptionalRuleString(item, "image_size"),
       active: item.active !== false
     };
   });
+}
+
+function ruleMatchesRequest(
+  rule: BillingRule | PricingRuleRecord,
+  request: EstimateBillingRequest,
+  upscaleFactor: number | null
+): boolean {
+  return (
+    matchesOptionalDimension(rule.gateway_model_code, request.gatewayModelCode) &&
+    matchesOptionalDimension(rule.gateway_capability, request.gatewayCapability) &&
+    matchesOptionalDimension(rule.quality, request.quality) &&
+    matchesOptionalDimension(rule.image_size, request.imageSize) &&
+    (rule.upscale_factor === null || rule.upscale_factor === upscaleFactor)
+  );
+}
+
+function matchesOptionalDimension(
+  configured: string | null,
+  requested: string | undefined
+): boolean {
+  return configured === null || configured === requested?.trim();
+}
+
+function ruleSpecificity(rule: BillingRule | PricingRuleRecord): number {
+  return [
+    rule.gateway_model_code,
+    rule.gateway_capability,
+    rule.quality,
+    rule.image_size,
+    rule.upscale_factor
+  ].filter((value) => value !== null).length;
 }
 
 function parseRuleUpscaleFactor(source: Record<string, unknown>): number | null {
@@ -538,6 +602,16 @@ function readRuleString(source: Record<string, unknown>, key: string): string {
   }
 
   return value.trim();
+}
+
+function readOptionalRuleString(source: Record<string, unknown>, key: string): string | null {
+  const value = source[key];
+
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  return readRuleString(source, key);
 }
 
 function normalizeQuantity(value: number | undefined): number {

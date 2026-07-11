@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { extname, normalize, resolve, sep } from "node:path";
@@ -6,6 +6,12 @@ import { extname, normalize, resolve, sep } from "node:path";
 import type { AppConfig } from "../config/app-config.js";
 import type { BillingService } from "../modules/billing/billing-service.js";
 import { BillingServiceError } from "../modules/billing/billing-service.js";
+import type {
+  PricingRuleAuditContext,
+  PricingRuleService,
+  SavePricingRuleRequest
+} from "../modules/billing/pricing-rule-service.js";
+import { PricingRuleServiceError } from "../modules/billing/pricing-rule-service.js";
 import type { FileService } from "../modules/files/file-service.js";
 import { FileServiceError } from "../modules/files/file-service.js";
 import type {
@@ -46,6 +52,7 @@ export interface AppDependencies {
     | "transitionTask"
   >;
   billingService?: Pick<BillingService, "estimate">;
+  pricingRuleService?: Pick<PricingRuleService, "listRules" | "createRule" | "updateRule">;
   imageGenerationWorkerService?: Pick<ImageGenerationWorkerService, "processTask">;
 }
 
@@ -70,6 +77,21 @@ async function handleRequest(
   const session = sessionStore.getSession(sessionToken);
 
   response.setHeader("X-Request-Id", requestId);
+
+  if (request.method === "GET" && url.pathname === "/admin/pricing") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有价格管理权限。");
+      return;
+    }
+
+    await servePublicFile(response, requestId, "admin-pricing.html");
+    return;
+  }
 
   if (
     request.method === "GET" &&
@@ -109,6 +131,126 @@ async function handleRequest(
 
   if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/health")) {
     writeJson(response, 200, createHealthResponse());
+    return;
+  }
+
+  if (url.pathname === "/api/admin/image/pricing-rules") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有价格管理权限。");
+      return;
+    }
+
+    if (dependencies.pricingRuleService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "PRICING_RULE_SERVICE_UNAVAILABLE",
+        "价格规则服务暂不可用。"
+      );
+      return;
+    }
+
+    await handlePricingRules(request, response, requestId, dependencies.pricingRuleService, {
+      actorUserId: session.user_id,
+      source: "admin_session",
+      requestId
+    });
+    return;
+  }
+
+  const adminPricingRuleMatch = /^\/api\/admin\/image\/pricing-rules\/([^/]+)$/u.exec(url.pathname);
+
+  if (request.method === "PATCH" && adminPricingRuleMatch !== null) {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有价格管理权限。");
+      return;
+    }
+
+    if (dependencies.pricingRuleService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "PRICING_RULE_SERVICE_UNAVAILABLE",
+        "价格规则服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleUpdatePricingRule(
+      request,
+      response,
+      requestId,
+      decodeURIComponent(adminPricingRuleMatch[1]),
+      dependencies.pricingRuleService,
+      { actorUserId: session.user_id, source: "admin_session", requestId }
+    );
+    return;
+  }
+
+  if (url.pathname === "/api/internal/image/pricing-rules") {
+    if (!hasValidInternalToken(request, config.internalApiToken)) {
+      writeError(response, 401, requestId, "INTERNAL_UNAUTHORIZED", "内部接口令牌无效。");
+      return;
+    }
+
+    if (dependencies.pricingRuleService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "PRICING_RULE_SERVICE_UNAVAILABLE",
+        "价格规则服务暂不可用。"
+      );
+      return;
+    }
+
+    await handlePricingRules(request, response, requestId, dependencies.pricingRuleService, {
+      actorUserId: null,
+      source: "internal_api",
+      requestId
+    });
+    return;
+  }
+
+  const pricingRuleMatch = /^\/api\/internal\/image\/pricing-rules\/([^/]+)$/u.exec(url.pathname);
+
+  if (request.method === "PATCH" && pricingRuleMatch !== null) {
+    if (!hasValidInternalToken(request, config.internalApiToken)) {
+      writeError(response, 401, requestId, "INTERNAL_UNAUTHORIZED", "内部接口令牌无效。");
+      return;
+    }
+
+    if (dependencies.pricingRuleService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "PRICING_RULE_SERVICE_UNAVAILABLE",
+        "价格规则服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleUpdatePricingRule(
+      request,
+      response,
+      requestId,
+      decodeURIComponent(pricingRuleMatch[1]),
+      dependencies.pricingRuleService,
+      { actorUserId: null, source: "internal_api", requestId }
+    );
     return;
   }
 
@@ -474,6 +616,8 @@ async function handleCreateImageTask(
       imageCount: readOptionalNumberField(body, "image_count"),
       upscaleFactor: readOptionalNumberField(body, "upscale_factor"),
       sourceTaskId: readOptionalStringField(body, "source_task_id"),
+      expectedPricingRuleId: readNullableStringField(body, "expected_price_rule_id"),
+      expectedPoints: readOptionalStringField(body, "expected_points"),
       idempotencyKey:
         readHeader(request, "idempotency-key") ?? readOptionalStringField(body, "idempotency_key"),
       entitlementId
@@ -521,18 +665,120 @@ async function handleBillingEstimate(
 ): Promise<void> {
   try {
     const body = await readJsonBody(request);
-    const result = billingService.estimate({
+    const result = await billingService.estimate({
       ownerUserId,
       taskType: readStringField(body, "task_type"),
       imageCount: readOptionalNumberField(body, "image_count"),
       quality: readOptionalStringField(body, "quality"),
       imageSize: readOptionalStringField(body, "image_size"),
-      upscaleFactor: readOptionalNumberField(body, "upscale_factor")
+      upscaleFactor: readOptionalNumberField(body, "upscale_factor"),
+      gatewayModelCode: readOptionalStringField(body, "gateway_model_code"),
+      gatewayCapability: readOptionalStringField(body, "gateway_capability")
     });
 
     writeJson(response, 200, result);
   } catch (error: unknown) {
     writePublicError(response, requestId, error);
+  }
+}
+
+async function handlePricingRules(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  service: Pick<PricingRuleService, "listRules" | "createRule">,
+  auditContext: PricingRuleAuditContext
+): Promise<void> {
+  try {
+    if (request.method === "GET") {
+      writeJson(response, 200, await service.listRules());
+      return;
+    }
+
+    if (request.method === "POST") {
+      const body = await readJsonBody(request);
+      writeJson(
+        response,
+        201,
+        await service.createRule(
+          readPricingRuleRequest(body, false) as SavePricingRuleRequest,
+          auditContext
+        )
+      );
+      return;
+    }
+
+    writeError(response, 405, requestId, "METHOD_NOT_ALLOWED", "请求方法不支持。");
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+async function handleUpdatePricingRule(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  ruleId: string,
+  service: Pick<PricingRuleService, "updateRule">,
+  auditContext: PricingRuleAuditContext
+): Promise<void> {
+  try {
+    const body = await readJsonBody(request);
+    writeJson(
+      response,
+      200,
+      await service.updateRule(ruleId, readPricingRuleRequest(body, true), auditContext)
+    );
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+function readPricingRuleRequest(
+  body: Record<string, unknown>,
+  partial: boolean
+): SavePricingRuleRequest | Partial<SavePricingRuleRequest> {
+  if (!partial) {
+    return {
+      taskType: readStringField(body, "task_type"),
+      gatewayModelCode: readNullableStringField(body, "gateway_model_code"),
+      gatewayCapability: readNullableStringField(body, "gateway_capability"),
+      quality: readNullableStringField(body, "quality"),
+      imageSize: readNullableStringField(body, "image_size"),
+      upscaleFactor: readNullableNumberField(body, "upscale_factor"),
+      usageType: readStringField(body, "usage_type"),
+      unit: readOptionalStringField(body, "unit"),
+      pointsPerUnit: readStringField(body, "points_per_unit"),
+      active: readOptionalBooleanField(body, "active")
+    };
+  }
+
+  const result: Partial<SavePricingRuleRequest> = {};
+
+  // PATCH 只传递请求中实际出现的字段，避免禁用规则时意外清空模型、质量或尺寸维度。
+  assignIfPresent(body, "task_type", result, "taskType", readOptionalStringField);
+  assignIfPresent(body, "gateway_model_code", result, "gatewayModelCode", readNullableStringField);
+  assignIfPresent(body, "gateway_capability", result, "gatewayCapability", readNullableStringField);
+  assignIfPresent(body, "quality", result, "quality", readNullableStringField);
+  assignIfPresent(body, "image_size", result, "imageSize", readNullableStringField);
+  assignIfPresent(body, "upscale_factor", result, "upscaleFactor", readNullableNumberField);
+  assignIfPresent(body, "usage_type", result, "usageType", readOptionalStringField);
+  assignIfPresent(body, "unit", result, "unit", readOptionalStringField);
+  assignIfPresent(body, "points_per_unit", result, "pointsPerUnit", readOptionalStringField);
+  assignIfPresent(body, "active", result, "active", readOptionalBooleanField);
+
+  return result;
+}
+
+function assignIfPresent<Target extends object, Key extends keyof Target>(
+  body: Record<string, unknown>,
+  sourceKey: string,
+  target: Target,
+  targetKey: Key,
+  reader: (body: Record<string, unknown>, key: string) => Target[Key]
+): void {
+  if (sourceKey in body) {
+    target[targetKey] = reader(body, sourceKey);
   }
 }
 
@@ -934,6 +1180,11 @@ function writePublicError(response: ServerResponse, requestId: string, error: un
     return;
   }
 
+  if (error instanceof PricingRuleServiceError) {
+    writeError(response, error.statusCode, requestId, error.code, error.message);
+    return;
+  }
+
   if (error instanceof RequestBodyError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
     return;
@@ -1013,6 +1264,48 @@ function readOptionalStringField(body: Record<string, unknown>, key: string): st
   return trimmed.length === 0 ? undefined : trimmed;
 }
 
+function readNullableStringField(
+  body: Record<string, unknown>,
+  key: string
+): string | null | undefined {
+  if (!(key in body)) {
+    return undefined;
+  }
+
+  const value = body[key];
+
+  if (value === null || value === "") {
+    return null;
+  }
+
+  return readOptionalStringField(body, key);
+}
+
+function readNullableNumberField(
+  body: Record<string, unknown>,
+  key: string
+): number | null | undefined {
+  if (!(key in body)) {
+    return undefined;
+  }
+
+  return body[key] === null ? null : readOptionalNumberField(body, key);
+}
+
+function readOptionalBooleanField(body: Record<string, unknown>, key: string): boolean | undefined {
+  const value = body[key];
+
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value !== "boolean") {
+    throw new RequestBodyError("REQUEST_FIELD_INVALID", `字段 ${key} 格式不正确。`, 400);
+  }
+
+  return value;
+}
+
 function readOptionalStringArrayField(
   body: Record<string, unknown>,
   key: string
@@ -1068,6 +1361,21 @@ function readHeader(request: IncomingMessage, name: string): string | undefined 
   }
 
   return value;
+}
+
+function hasValidInternalToken(request: IncomingMessage, expectedToken: string): boolean {
+  const authorization = readHeader(request, "authorization") ?? "";
+  const suppliedToken = authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+  const supplied = Buffer.from(suppliedToken);
+  const expected = Buffer.from(expectedToken);
+
+  // 长度不同不能调用 timingSafeEqual；统一拒绝且不把 token 写入日志或错误响应。
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
+function isAdminUser(userId: number, adminUserIds: number[] | undefined): boolean {
+  // 管理权限只来源于服务端白名单，浏览器提交的 user_id 不参与判断。
+  return adminUserIds?.includes(userId) === true;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
