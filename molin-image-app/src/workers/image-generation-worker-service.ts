@@ -24,6 +24,13 @@ export interface ProcessImageTaskResult {
   task: PublicImageTask;
 }
 
+export interface WorkerStylePresetResolver {
+  getEnabledPresetForTask(
+    taskType: string,
+    presetId: string
+  ): Promise<{ prompt_template: string } | undefined>;
+}
+
 export class ImageGenerationWorkerService {
   constructor(
     private readonly taskRepository: ImageTasksRepository,
@@ -32,7 +39,8 @@ export class ImageGenerationWorkerService {
     private readonly aiGatewayClient: AiGatewayImageGenerationClient,
     private readonly aiGatewayLogsRepository: AiGatewayCallLogsRepository,
     private readonly visionTextClient?: AiGatewayVisionTextClient,
-    private readonly imageEditClient?: AiGatewayImageEditClient
+    private readonly imageEditClient?: AiGatewayImageEditClient,
+    private readonly stylePresetResolver?: WorkerStylePresetResolver
   ) {}
 
   async processTask(taskId: string): Promise<ProcessImageTaskResult> {
@@ -81,8 +89,9 @@ export class ImageGenerationWorkerService {
     let gatewayCompleted = false;
 
     try {
+      const prompt = await this.buildTextToImagePrompt(task);
       const generated = await this.aiGatewayClient.generateImage({
-        prompt: task.prompt,
+        prompt,
         negativePrompt: task.negative_prompt,
         model: task.gateway_model_code ?? "image_generation",
         size: task.image_size ?? "1024x1024",
@@ -114,7 +123,7 @@ export class ImageGenerationWorkerService {
         latency_ms: Date.now() - startedAt,
         success: true,
         usage_json: generated.usage,
-        input_summary: summarizeText(task.prompt),
+        input_summary: summarizeText(prompt),
         output_summary: `generated_files=${String(outputFileIds.length)}`,
         error_code: null,
         error_message: null
@@ -141,7 +150,7 @@ export class ImageGenerationWorkerService {
         latency_ms: Date.now() - startedAt,
         success: false,
         usage_json: null,
-        input_summary: summarizeText(task.prompt),
+        input_summary: summarizeText(await this.buildTextToImagePrompt(task)),
         output_summary: null,
         error_code: errorCode,
         error_message: message
@@ -153,8 +162,8 @@ export class ImageGenerationWorkerService {
   private async processImageToImageTask(task: ImageTaskRecord): Promise<ProcessImageTaskResult> {
     return await this.processImageEditTask(task, {
       operation: "image_to_image",
-      resolveRequest: () => ({
-        prompt: buildImageEditPrompt(task.prompt, task.style_preset_id),
+      resolveRequest: async () => ({
+        prompt: await this.buildImageEditPrompt(task),
         size: task.image_size ?? "1024x1024",
         count: task.image_count
       }),
@@ -168,8 +177,8 @@ export class ImageGenerationWorkerService {
   private async processImageRestoreTask(task: ImageTaskRecord): Promise<ProcessImageTaskResult> {
     return await this.processImageEditTask(task, {
       operation: "image_restore",
-      resolveRequest: () => ({
-        prompt: buildImageRestorePrompt(task.prompt, task.style_preset_id),
+      resolveRequest: async () => ({
+        prompt: await this.buildImageRestorePrompt(task),
         size: task.image_size ?? "1024x1024",
         count: task.image_count
       }),
@@ -223,13 +232,21 @@ export class ImageGenerationWorkerService {
     task: ImageTaskRecord,
     options: {
       operation: "image_to_image" | "image_restore" | "upscale";
-      resolveRequest: (inputFile: FileContentResult) => {
-        prompt: string;
-        size: string;
-        count: number;
-        expectedWidth?: number;
-        expectedHeight?: number;
-      };
+      resolveRequest: (inputFile: FileContentResult) =>
+        | {
+            prompt: string;
+            size: string;
+            count: number;
+            expectedWidth?: number;
+            expectedHeight?: number;
+          }
+        | Promise<{
+            prompt: string;
+            size: string;
+            count: number;
+            expectedWidth?: number;
+            expectedHeight?: number;
+          }>;
       unavailableMessage: string;
       inputRequiredMessage: string;
       gatewayFailedMessage: string;
@@ -264,7 +281,7 @@ export class ImageGenerationWorkerService {
         task.owner_user_id,
         task.input_file_ids[0] ?? ""
       );
-      const editRequest = options.resolveRequest(inputFile);
+      const editRequest = await options.resolveRequest(inputFile);
       const edited = await this.imageEditClient.editImage({
         imageBase64: inputFile.content_base64,
         imageMimeType: inputFile.file.mime_type,
@@ -451,6 +468,43 @@ export class ImageGenerationWorkerService {
       errorMessage: message
     });
   }
+
+  private async buildTextToImagePrompt(task: ImageTaskRecord): Promise<string> {
+    const userPrompt = task.prompt?.trim() ?? "";
+    const template = await this.resolveStylePromptTemplate(task);
+
+    if (template === null) {
+      return userPrompt;
+    }
+
+    return `${template}\n\n用户创作要求：${userPrompt}`;
+  }
+
+  private async buildImageEditPrompt(task: ImageTaskRecord): Promise<string> {
+    const template = await this.resolveStylePromptTemplate(task);
+
+    return buildImageEditPromptWithTemplate(task.prompt, task.style_preset_id, template);
+  }
+
+  private async buildImageRestorePrompt(task: ImageTaskRecord): Promise<string> {
+    const template = await this.resolveStylePromptTemplate(task);
+
+    return buildImageRestorePromptWithTemplate(task.prompt, task.style_preset_id, template);
+  }
+
+  private async resolveStylePromptTemplate(task: ImageTaskRecord): Promise<string | null> {
+    if (task.style_preset_id === null || this.stylePresetResolver === undefined) {
+      return null;
+    }
+
+    const preset = await this.stylePresetResolver.getEnabledPresetForTask(
+      task.task_type,
+      task.style_preset_id
+    );
+
+    // 模板停用不阻断已进入 worker 的历史任务；缺失时使用内置提示词兜底。
+    return preset?.prompt_template ?? null;
+  }
 }
 
 function resolvePublicWorkerErrorMessage(errorCode: string): string {
@@ -462,9 +516,13 @@ function resolvePublicWorkerErrorMessage(errorCode: string): string {
   return "AI 模型服务调用失败，请稍后重试。";
 }
 
-function buildImageEditPrompt(prompt: string | null, editMode: string | null): string {
+function buildImageEditPromptWithTemplate(
+  prompt: string | null,
+  editMode: string | null,
+  template: string | null
+): string {
   const userPrompt = prompt?.trim();
-  const modeInstruction = resolveImageEditModeInstruction(editMode);
+  const modeInstruction = template ?? resolveImageEditModeInstruction(editMode);
 
   if (userPrompt !== undefined && userPrompt.length > 0) {
     return `${modeInstruction}\n\n用户编辑要求：${userPrompt}`;
@@ -484,9 +542,13 @@ function resolveImageEditModeInstruction(editMode: string | null): string {
   return instructions[editMode ?? ""] ?? "请基于参考图生成新图，并遵循用户补充的编辑要求。";
 }
 
-function buildImageRestorePrompt(prompt: string | null, restoreType: string | null): string {
+function buildImageRestorePromptWithTemplate(
+  prompt: string | null,
+  restoreType: string | null,
+  template: string | null
+): string {
   const userPrompt = prompt?.trim();
-  const typeInstruction = resolveImageRestoreTypeInstruction(restoreType);
+  const typeInstruction = template ?? resolveImageRestoreTypeInstruction(restoreType);
   const qualityInstruction =
     "请只修复图片质量问题，保留原始主体身份、构图、时代特征和真实纹理，避免改变人物五官或添加无关内容。";
 

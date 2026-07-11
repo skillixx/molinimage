@@ -95,6 +95,13 @@ export interface ImageTaskModelResolver {
   ): Promise<{ gatewayModelCode: string; gatewayCapability: string } | null>;
 }
 
+export interface ImageTaskStylePresetResolver {
+  getEnabledPresetForTask(
+    taskType: string,
+    presetId: string
+  ): Promise<{ prompt_template: string } | undefined>;
+}
+
 export interface PublicImageTask {
   id: string;
   source_task_id: string | null;
@@ -172,7 +179,8 @@ export class ImageTaskService {
     private readonly repository: ImageTasksRepository,
     private readonly billingService?: Pick<BillingService, "release" | "reserve" | "settle">,
     private readonly auditLogger?: ImageTaskAuditLogger,
-    private readonly modelResolver?: ImageTaskModelResolver
+    private readonly modelResolver?: ImageTaskModelResolver,
+    private readonly stylePresetResolver?: ImageTaskStylePresetResolver
   ) {}
 
   async createTask(request: CreateImageTaskRequest): Promise<ImageTaskResult> {
@@ -232,6 +240,22 @@ export class ImageTaskService {
       );
     }
 
+    if (stylePresetId !== null && this.stylePresetResolver !== undefined) {
+      const stylePreset = await this.stylePresetResolver.getEnabledPresetForTask(
+        taskType,
+        stylePresetId
+      );
+
+      if (stylePreset === undefined) {
+        // 风格模板必须在计费前确认仍启用，停用模板不能继续产生新任务或占用额度。
+        throw new ImageTaskServiceError(
+          "STYLE_PRESET_UNAVAILABLE",
+          "风格模板不可用或已停用。",
+          400
+        );
+      }
+    }
+
     const taskCreateIdempotencyKey =
       normalizeOptionalString(request.idempotencyKey) ?? `task_create_${randomUUID()}`;
     const existingTask = await this.repository.findByIdempotencyKey(taskCreateIdempotencyKey);
@@ -272,7 +296,10 @@ export class ImageTaskService {
         );
       }
 
-      if (stylePresetId === null || !supportedImageRestoreTypes.has(stylePresetId)) {
+      if (
+        stylePresetId === null ||
+        (this.stylePresetResolver === undefined && !supportedImageRestoreTypes.has(stylePresetId))
+      ) {
         // 修复类型在计费预占前收紧，防止非法字符串进入 worker 后静默降级并占用额度。
         throw new ImageTaskServiceError("IMAGE_RESTORE_TYPE_INVALID", "图片修复类型不合法。", 400);
       }

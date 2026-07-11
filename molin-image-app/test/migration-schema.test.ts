@@ -34,7 +34,8 @@ const requiredIndexes = [
   "idx_pricing_rules_capability_active",
   "uk_image_model_configs_source",
   "idx_image_model_configs_visible",
-  "idx_image_model_defaults_model"
+  "idx_image_model_defaults_model",
+  "idx_style_presets_task_category_enabled_sort"
 ];
 
 void test("基础表 migration 包含 P1-G02 要求的表、引擎、字符集和关键索引", async () => {
@@ -169,6 +170,23 @@ void test("模型管理 migration 支持同步、开关和默认模型配置", a
   assert.match(upSql, /PRIMARY KEY \(task_type\)/i);
   assert.match(downSql, /DROP TABLE IF EXISTS image_model_defaults/i);
   assert.match(downSql, /DROP TABLE IF EXISTS image_model_configs/i);
+});
+
+void test("风格模板 migration 支持分类、预览图、排序启停和默认模板", async () => {
+  const upSql = await readFile(resolve("migrations", "010_enhance_style_presets.up.sql"), "utf8");
+  const downSql = await readFile(
+    resolve("migrations", "010_enhance_style_presets.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /ADD COLUMN category VARCHAR\(64\)/i);
+  assert.match(upSql, /ADD COLUMN preview_image_url VARCHAR\(512\)/i);
+  assert.match(upSql, /idx_style_presets_task_category_enabled_sort/i);
+  assert.match(upSql, /tti_product_poster/i);
+  assert.match(upSql, /change_background/i);
+  assert.match(upSql, /old_photo/i);
+  assert.match(downSql, /DROP COLUMN preview_image_url/i);
+  assert.match(downSql, /DROP COLUMN category/i);
 });
 
 async function readAllUpMigrations(): Promise<string> {

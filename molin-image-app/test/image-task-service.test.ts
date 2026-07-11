@@ -19,6 +19,7 @@ import type {
 import {
   type ImageTaskAuditEvent,
   type ImageTaskModelResolver,
+  type ImageTaskStylePresetResolver,
   ImageTaskService,
   ImageTaskServiceError
 } from "../src/modules/image-tasks/image-task-service.js";
@@ -80,6 +81,35 @@ void test("创建任务会使用后台默认模型，并在模型不可用时阻
 
   // 模型关闭或能力不匹配时必须在计费前失败，避免错误请求占用额度。
   assert.equal(billingService.reserveRequests.length, 1);
+});
+
+void test("停用或不存在的风格模板不能创建任务且不会计费", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new FakeBillingService();
+  const styleResolver = new FakeImageTaskStylePresetResolver(false);
+  const service = new ImageTaskService(
+    repository,
+    billingService,
+    undefined,
+    undefined,
+    styleResolver
+  );
+
+  await assert.rejects(
+    () =>
+      service.createTask({
+        ownerUserId: 479,
+        taskType: "text_to_image",
+        prompt: "一张产品海报",
+        stylePresetId: "disabled_style",
+        entitlementId: 62
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "STYLE_PRESET_UNAVAILABLE"
+  );
+
+  assert.equal(billingService.reserveRequests.length, 0);
+  assert.equal(repository.records.size, 0);
 });
 
 void test("图片修复只接受四种修复类型且必须关联一张原图", async () => {
@@ -1026,6 +1056,14 @@ class FakeImageTaskModelResolver implements ImageTaskModelResolver {
 
   resolveTaskModel(): Promise<{ gatewayModelCode: string; gatewayCapability: string } | null> {
     return Promise.resolve(this.result);
+  }
+}
+
+class FakeImageTaskStylePresetResolver implements ImageTaskStylePresetResolver {
+  constructor(private readonly enabled: boolean) {}
+
+  getEnabledPresetForTask(): Promise<{ prompt_template: string } | undefined> {
+    return Promise.resolve(this.enabled ? { prompt_template: "测试模板" } : undefined);
   }
 }
 

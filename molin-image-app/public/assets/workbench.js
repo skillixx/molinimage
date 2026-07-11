@@ -7,6 +7,7 @@ import {
   getImageHistory,
   getImageTask,
   getImageModels,
+  getStylePresets,
   retryImageTask,
   uploadImageFile
 } from "./api-client.js";
@@ -57,6 +58,7 @@ const modeConfig = {
 const state = {
   mode: "text_to_image",
   models: [],
+  stylePresets: [],
   estimate: null,
   estimateRequestId: 0,
   isSubmitting: false,
@@ -84,6 +86,9 @@ const elements = {
   editModeSelect: document.querySelector("#editModeSelect"),
   restoreTypeField: document.querySelector("#restoreTypeField"),
   restoreTypeSelect: document.querySelector("#restoreTypeSelect"),
+  stylePresetField: document.querySelector("#stylePresetField"),
+  stylePresetSelect: document.querySelector("#stylePresetSelect"),
+  stylePresetList: document.querySelector("#stylePresetList"),
   upscaleFactorField: document.querySelector("#upscaleFactorField"),
   upscaleFactorSelect: document.querySelector("#upscaleFactorSelect"),
   modelSelect: document.querySelector("#modelSelect"),
@@ -126,6 +131,15 @@ elements.modelSelect.addEventListener("change", () => {
 elements.qualitySelect.addEventListener("change", () => {
   void refreshEstimate();
 });
+elements.stylePresetSelect.addEventListener("change", () => {
+  renderStylePresetList();
+});
+elements.editModeSelect.addEventListener("change", () => {
+  renderStylePresetList();
+});
+elements.restoreTypeSelect.addEventListener("change", () => {
+  renderStylePresetList();
+});
 elements.primaryAction.addEventListener("click", () => {
   void submitCurrentTask();
 });
@@ -156,6 +170,8 @@ for (const tab of elements.modeTabs) {
     elements.resultList.replaceChildren();
     renderMode();
     renderModelOptions();
+    renderStylePresetOptions();
+    renderStylePresetList();
     renderProgress("idle");
     void refreshEstimate();
     void refreshHistory();
@@ -169,8 +185,13 @@ async function bootstrapWorkbench() {
   setModelHealth("模型加载中", "loading");
 
   try {
-    const [user, modelCatalog] = await Promise.all([getCurrentUser(), getImageModels()]);
+    const [user, modelCatalog, stylePresetCatalog] = await Promise.all([
+      getCurrentUser(),
+      getImageModels(),
+      getStylePresets()
+    ]);
     state.models = modelCatalog.items ?? [];
+    state.stylePresets = stylePresetCatalog.items ?? [];
     elements.sessionSummary.textContent = `用户 ${String(user.user_id)} · 应用 ${String(user.app_id)}`;
     setModelHealth(
       resolveModelHealthText(modelCatalog),
@@ -178,15 +199,20 @@ async function bootstrapWorkbench() {
     );
     renderMode();
     renderModelOptions();
+    renderStylePresetOptions();
+    renderStylePresetList();
     renderModelList(modelCatalog);
     renderProgress("idle");
     await Promise.all([refreshEstimate(), refreshHistory()]);
   } catch (error) {
     elements.sessionSummary.textContent = "未建立应用会话";
     state.models = [];
+    state.stylePresets = [];
     setModelHealth("模型不可用", "warning");
     renderMode();
     renderModelOptions();
+    renderStylePresetOptions();
+    renderStylePresetList();
     renderModelList({ items: [], message: "请从墨灵平台进入应用后重试。" });
     renderProgress("idle");
     showError(error instanceof Error ? error.message : "工作台加载失败。");
@@ -203,6 +229,8 @@ function renderMode() {
   elements.promptField.hidden = state.mode === "upscale";
   elements.editModeField.hidden = state.mode !== "image_to_image";
   elements.restoreTypeField.hidden = state.mode !== "image_restore";
+  elements.stylePresetField.hidden = state.mode !== "text_to_image";
+  elements.stylePresetList.hidden = !hasStylePresetSupport(state.mode);
   elements.upscaleFactorField.hidden = state.mode !== "upscale";
   elements.sizeField.hidden = state.mode === "upscale";
   elements.qualityField.hidden = state.mode === "image_to_text" || state.mode === "upscale";
@@ -342,6 +370,7 @@ async function submitTextToImageTask() {
       ...currentPricingExpectation(),
       task_type: "text_to_image",
       prompt,
+      style_preset_id: elements.stylePresetSelect.value || undefined,
       gateway_model_code: modelCode,
       gateway_capability: "image_generation",
       quality: elements.qualitySelect.value,
@@ -934,6 +963,100 @@ function renderModelOptions() {
   }
 }
 
+function renderStylePresetOptions() {
+  const presets = currentModeStylePresets();
+  const select =
+    state.mode === "image_to_image"
+      ? elements.editModeSelect
+      : state.mode === "image_restore"
+        ? elements.restoreTypeSelect
+        : elements.stylePresetSelect;
+
+  if (!hasStylePresetSupport(state.mode)) {
+    return;
+  }
+
+  select.replaceChildren();
+
+  if (presets.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "暂无模板";
+    select.append(option);
+    return;
+  }
+
+  for (const preset of presets) {
+    const option = document.createElement("option");
+    option.value = preset.id;
+    option.textContent = preset.name;
+    select.append(option);
+  }
+}
+
+function renderStylePresetList() {
+  if (!hasStylePresetSupport(state.mode)) {
+    elements.stylePresetList.replaceChildren();
+    elements.stylePresetList.hidden = true;
+    return;
+  }
+
+  const presets = currentModeStylePresets();
+  const selectedId = currentStylePresetId();
+  elements.stylePresetList.replaceChildren();
+  elements.stylePresetList.hidden = presets.length === 0;
+
+  for (const preset of presets) {
+    const card = document.createElement("article");
+    const image = document.createElement("img");
+    const name = document.createElement("strong");
+    const category = document.createElement("small");
+
+    card.className = "style-preset-card";
+    card.dataset.selected = preset.id === selectedId ? "true" : "false";
+    image.alt = preset.name;
+    image.src = preset.preview_image_url ?? "";
+    name.textContent = preset.name;
+    category.textContent = preset.category;
+    card.append(image, name, category);
+    card.addEventListener("click", () => {
+      setCurrentStylePresetId(preset.id);
+      renderStylePresetList();
+    });
+    elements.stylePresetList.append(card);
+  }
+}
+
+function currentModeStylePresets() {
+  return state.stylePresets.filter((preset) => preset.task_type === state.mode);
+}
+
+function hasStylePresetSupport(taskType) {
+  return (
+    taskType === "text_to_image" || taskType === "image_to_image" || taskType === "image_restore"
+  );
+}
+
+function currentStylePresetId() {
+  if (state.mode === "image_to_image") return elements.editModeSelect.value;
+  if (state.mode === "image_restore") return elements.restoreTypeSelect.value;
+  return elements.stylePresetSelect.value;
+}
+
+function setCurrentStylePresetId(presetId) {
+  if (state.mode === "image_to_image") {
+    elements.editModeSelect.value = presetId;
+    return;
+  }
+
+  if (state.mode === "image_restore") {
+    elements.restoreTypeSelect.value = presetId;
+    return;
+  }
+
+  elements.stylePresetSelect.value = presetId;
+}
+
 function renderModelList(modelCatalog) {
   elements.modelList.replaceChildren();
 
@@ -1365,6 +1488,7 @@ function useTaskForReedit(task, file) {
   elements.promptInput.value = task.prompt ?? "";
   renderMode();
   renderModelOptions();
+  renderStylePresetOptions();
   elements.editModeSelect.value = "keep_subject";
   elements.sizeSelect.value = "1024x1024";
   elements.countSelect.value = "1";
@@ -1372,6 +1496,7 @@ function useTaskForReedit(task, file) {
   setSelectValueIfAvailable(elements.modelSelect, task.gateway_model_code);
   setSelectValueIfAvailable(elements.sizeSelect, task.image_size);
   setSelectValueIfAvailable(elements.countSelect, String(task.image_count));
+  renderStylePresetList();
   renderProgress("idle");
   void refreshEstimate();
   void refreshHistory();

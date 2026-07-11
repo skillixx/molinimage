@@ -15,6 +15,11 @@ import { PricingRuleServiceError } from "../modules/billing/pricing-rule-service
 import type { FileService } from "../modules/files/file-service.js";
 import { FileServiceError } from "../modules/files/file-service.js";
 import type {
+  SaveStylePresetRequest,
+  StylePresetService
+} from "../modules/style-presets/style-preset-service.js";
+import { StylePresetServiceError } from "../modules/style-presets/style-preset-service.js";
+import type {
   ImageTaskService,
   ImageTaskStatus
 } from "../modules/image-tasks/image-task-service.js";
@@ -57,6 +62,10 @@ export interface AppDependencies {
   >;
   billingService?: Pick<BillingService, "estimate">;
   pricingRuleService?: Pick<PricingRuleService, "listRules" | "createRule" | "updateRule">;
+  stylePresetService?: Pick<
+    StylePresetService,
+    "createPreset" | "listManagedPresets" | "listVisiblePresets" | "updatePreset"
+  >;
   imageGenerationWorkerService?: Pick<ImageGenerationWorkerService, "processTask">;
 }
 
@@ -109,6 +118,21 @@ async function handleRequest(
     }
 
     await servePublicFile(response, requestId, "admin-models.html");
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/admin/styles") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有风格模板管理权限。");
+      return;
+    }
+
+    await servePublicFile(response, requestId, "admin-styles.html");
     return;
   }
 
@@ -310,6 +334,27 @@ async function handleRequest(
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/api/image/style-presets") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (dependencies.stylePresetService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "STYLE_PRESET_SERVICE_UNAVAILABLE",
+        "风格模板服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleVisibleStylePresets(url, response, requestId, dependencies.stylePresetService);
+    return;
+  }
+
   if (url.pathname === "/api/admin/image/models") {
     if (session === undefined) {
       writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
@@ -410,6 +455,66 @@ async function handleRequest(
       session.user_id,
       decodeURIComponent(adminImageModelMatch[1]),
       dependencies.imageModelService as Pick<ImageModelService, "updateManagedModel">
+    );
+    return;
+  }
+
+  if (url.pathname === "/api/admin/image/style-presets") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有风格模板管理权限。");
+      return;
+    }
+
+    if (dependencies.stylePresetService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "STYLE_PRESET_SERVICE_UNAVAILABLE",
+        "风格模板服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleAdminStylePresets(request, response, requestId, dependencies.stylePresetService);
+    return;
+  }
+
+  const adminStylePresetMatch = /^\/api\/admin\/image\/style-presets\/([^/]+)$/u.exec(url.pathname);
+
+  if (request.method === "PATCH" && adminStylePresetMatch !== null) {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有风格模板管理权限。");
+      return;
+    }
+
+    if (dependencies.stylePresetService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "STYLE_PRESET_SERVICE_UNAVAILABLE",
+        "风格模板服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleUpdateStylePreset(
+      request,
+      response,
+      requestId,
+      decodeURIComponent(adminStylePresetMatch[1]),
+      dependencies.stylePresetService
     );
     return;
   }
@@ -1242,6 +1347,105 @@ function readUpdateImageModelRequest(body: Record<string, unknown>) {
   return result;
 }
 
+async function handleVisibleStylePresets(
+  url: URL,
+  response: ServerResponse,
+  requestId: string,
+  stylePresetService: Pick<StylePresetService, "listVisiblePresets">
+): Promise<void> {
+  try {
+    const result = await stylePresetService.listVisiblePresets(
+      url.searchParams.get("task_type") ?? undefined
+    );
+
+    writeJson(response, 200, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+async function handleAdminStylePresets(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  stylePresetService: Pick<StylePresetService, "createPreset" | "listManagedPresets">
+): Promise<void> {
+  try {
+    if (request.method === "GET") {
+      const result = await stylePresetService.listManagedPresets();
+      writeJson(response, 200, result);
+      return;
+    }
+
+    if (request.method === "POST") {
+      const body = await readJsonBody(request);
+      const result = await stylePresetService.createPreset(readSaveStylePresetRequest(body));
+      writeJson(response, 201, result);
+      return;
+    }
+
+    writeError(response, 405, requestId, "METHOD_NOT_ALLOWED", "请求方法不支持。");
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+async function handleUpdateStylePreset(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  presetId: string,
+  stylePresetService: Pick<StylePresetService, "updatePreset">
+): Promise<void> {
+  try {
+    const body = await readJsonBody(request);
+    const result = await stylePresetService.updatePreset(
+      presetId,
+      readPatchStylePresetRequest(body)
+    );
+
+    writeJson(response, 200, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+function readSaveStylePresetRequest(body: Record<string, unknown>): SaveStylePresetRequest {
+  return {
+    name: readStringField(body, "name"),
+    category: readStringField(body, "category"),
+    taskType: readStringField(body, "task_type"),
+    promptTemplate: readStringField(body, "prompt_template"),
+    previewImageFileId: readNullableStringField(body, "preview_image_file_id"),
+    previewImageUrl: readNullableStringField(body, "preview_image_url"),
+    enabled: readOptionalBooleanField(body, "enabled"),
+    sortOrder: readOptionalNumberField(body, "sort_order")
+  };
+}
+
+function readPatchStylePresetRequest(
+  body: Record<string, unknown>
+): Partial<SaveStylePresetRequest> {
+  const result: Partial<SaveStylePresetRequest> = {};
+
+  assignIfPresent(body, "name", result, "name", readOptionalStringField);
+  assignIfPresent(body, "category", result, "category", readOptionalStringField);
+  assignIfPresent(body, "task_type", result, "taskType", readOptionalStringField);
+  assignIfPresent(body, "prompt_template", result, "promptTemplate", readOptionalStringField);
+  assignIfPresent(
+    body,
+    "preview_image_file_id",
+    result,
+    "previewImageFileId",
+    readNullableStringField
+  );
+  assignIfPresent(body, "preview_image_url", result, "previewImageUrl", readNullableStringField);
+  assignIfPresent(body, "enabled", result, "enabled", readOptionalBooleanField);
+  assignIfPresent(body, "sort_order", result, "sortOrder", readOptionalNumberField);
+
+  return result;
+}
+
 function configSafeRequiredCapabilitiesFallback(): string[] {
   return ["image_generation", "vision_text", "moderation"];
 }
@@ -1412,6 +1616,11 @@ function writePublicError(response: ServerResponse, requestId: string, error: un
   }
 
   if (error instanceof ImageModelServiceError) {
+    writeError(response, error.statusCode, requestId, error.code, error.message);
+    return;
+  }
+
+  if (error instanceof StylePresetServiceError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
     return;
   }

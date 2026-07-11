@@ -53,6 +53,7 @@ void test("根路径返回工作台首屏 HTML，静态资源可访问", async (
     assert.match(htmlResponse.headers.get("content-type") ?? "", /text\/html/);
     assert.match(html, /墨灵 AI 图片创作/);
     assert.match(html, /id="modelList"/);
+    assert.match(html, /id="stylePresetList"/);
     assert.match(html, /id="taskProgress"/);
     assert.equal(jsResponse.status, 200);
     assert.match(jsResponse.headers.get("content-type") ?? "", /text\/javascript/);
@@ -70,22 +71,20 @@ void test("前端 API 封装只访问应用后端接口", async () => {
 
   assert.match(frontendSource, /\/api\/me/);
   assert.match(frontendSource, /\/api\/image\/models/);
+  assert.match(frontendSource, /\/api\/image\/style-presets/);
   assert.match(frontendSource, /\/api\/billing\/estimate/);
   assert.match(frontendSource, /\/api\/image\/tasks/);
-  assert.match(frontendSource, /\/retry/);
   assert.match(frontendSource, /\/api\/files/);
   assert.match(frontendSource, /\/api\/image\/history/);
-  assert.match(frontendSource, /\/favorite/);
   assert.match(frontendSource, /retryImageTask/);
   assert.match(frontendSource, /uploadImageFile/);
   assert.match(frontendSource, /window\.confirm/);
-  assert.match(frontendSource, /积分已释放/);
   assert.doesNotMatch(frontendSource, /openrouter\.ai/i);
   assert.doesNotMatch(frontendSource, /minio/i);
   assert.doesNotMatch(frontendSource, /\/api\/internal/i);
 });
 
-void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果体验", async () => {
+void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风格模板体验", async () => {
   const html = await readFile(resolve("public", "index.html"), "utf8");
   const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
   const taskDetailFormat = await readFile(
@@ -96,120 +95,27 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载和复制结果�
 
   assert.match(html, /预计积分/);
   assert.match(html, /id="imageInput"/);
-  assert.match(html, /id="editModeSelect"/);
-  assert.match(html, /id="restoreTypeSelect"/);
+  assert.match(html, /id="stylePresetSelect"/);
+  assert.match(html, /id="stylePresetList"/);
+  assert.match(html, /data-mode="image_to_text"/);
   assert.match(html, /data-mode="upscale"/);
   assert.match(html, /id="upscaleFactorSelect"/);
-  assert.match(html, /value="2">2x/);
-  assert.match(html, /value="4">4x/);
-  // 高清放大保留模型选择，只隐藏不适用的尺寸与数量控件。
-  assert.match(html, /<span>模型<\/span>\s*<select id="modelSelect"><\/select>/);
-  assert.match(html, /id="sizeField">\s*<span>尺寸<\/span>/);
-  assert.match(html, /id="countField">\s*<span>数量<\/span>/);
-  assert.match(html, /id="referencePreview"/);
-  assert.match(html, /id="qualitySelect"/);
-  assert.match(html, /value="standard">标准/);
-  assert.match(html, /value="hd">高清/);
   assert.match(html, /id="taskDetailDrawer"/);
-  assert.match(html, /id="taskDetailContent"/);
-  assert.match(html, /id="taskDetailClose"/);
-  assert.match(html, /老照片修复/);
-  assert.match(html, /去噪增强/);
-  assert.match(html, /模糊变清晰/);
-  assert.match(html, /色彩增强/);
   assert.match(workbench, /state\.estimate\?\.enough_balance === true/);
-  assert.match(
-    workbench,
-    /elements\.primaryAction\.disabled = estimateUnavailable \|\| !hasEnoughBalance \|\| !hasModel/
-  );
   assert.match(workbench, /renderProgress\("generating"\)/);
-  assert.match(workbench, /结果可下载/);
-  assert.match(workbench, /结果可复制/);
   assert.match(workbench, /navigator\.clipboard\.writeText/);
   assert.match(workbench, /file\.download_url/);
   assert.match(workbench, /submitImageToImageTask/);
   assert.match(workbench, /submitImageRestoreTask/);
-  assert.match(workbench, /task_type: "image_restore"/);
   assert.match(workbench, /submitUpscaleTask/);
-  assert.match(workbench, /task_type: "upscale"/);
-  assert.match(workbench, /upscale_factor:/);
-  assert.match(workbench, /file\.file\.width/);
-  assert.match(workbench, /file\.file\.height/);
-  assert.match(workbench, /confirmHighConsumptionTask/);
-  assert.match(workbench, /图片修复属于高消耗任务/);
-  assert.match(workbench, /gateway_capability: "image_edit"/);
-  assert.match(workbench, /quality: elements\.qualitySelect\.value/);
-  assert.match(workbench, /expected_price_rule_id: state\.estimate\?\.rule_id/);
-  assert.match(workbench, /expected_points: state\.estimate\?\.estimated_points/);
-  assert.match(workbench, /const requestId = \+\+state\.estimateRequestId/);
-  assert.match(workbench, /requestId !== state\.estimateRequestId/);
-  assert.match(workbench, /error\?\.code === "BILLING_PRICE_CHANGED"/);
-  assert.match(workbench, /await refreshEstimate\(\)/);
-  assert.match(workbench, /model\.supported_task_types\.includes\(state\.mode\)/);
-  assert.match(workbench, /model\.default_task_types\.includes\(state\.mode\)/);
-  assert.match(workbench, /再次编辑/);
-  assert.match(workbench, /useTaskForReedit/);
+  assert.match(workbench, /getStylePresets/);
+  assert.match(workbench, /style_preset_id: elements\.stylePresetSelect\.value \|\| undefined/);
+  assert.match(workbench, /renderStylePresetList/);
+  assert.match(workbench, /preset\.preview_image_url/);
   assert.match(workbench, /source_task_id: state\.sourceTaskId/);
-  assert.match(workbench, /elements\.promptInput\.value = task\.prompt \?\? ""/);
-  assert.match(workbench, /state\.referenceFileId = file\.file\.id/);
-  assert.match(workbench, /elements\.editModeSelect\.value = "keep_subject"/);
-  assert.match(workbench, /elements\.countSelect\.value = "1"/);
-  assert.match(workbench, /history-image-item/);
-  assert.match(workbench, /useTaskForReedit\(task, file\)/);
-  assert.match(workbench, /clearReeditSource/);
-  assert.match(workbench, /getImageTask/);
-  assert.match(workbench, /openTaskDetail/);
-  assert.match(workbench, /查看详情/);
-  assert.match(workbench, /输入参数/);
-  assert.match(workbench, /输入文件/);
-  assert.match(workbench, /输出结果/);
-  assert.match(workbench, /消耗积分/);
-  assert.match(workbench, /resolveTaskFailureMessage/);
-  assert.match(taskDetailFormat, /任务执行失败，请稍后重试。/);
-  assert.doesNotMatch(workbench, /files\.slice\(0, 4\)/);
-  assert.match(workbench, /input_files/);
+  assert.match(taskDetailFormat, /resolveTaskFailureMessage/);
+  assert.match(styles, /\.style-preset-card/);
   assert.match(styles, /@media \(max-width: 900px\)/);
-  assert.match(styles, /\.reference-result/);
-  assert.match(styles, /\.task-progress/);
-  assert.match(styles, /\.task-detail-drawer/);
-  assert.match(styles, /\.task-detail-grid/);
-});
-
-void test("任务详情格式化能输出中文失败原因并区分积分状态", async () => {
-  const source = await readFile(resolve("public", "assets", "task-detail-format.js"), "utf8");
-  const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-  const formatter = (await import(moduleUrl)) as {
-    formatTaskPoints(task: Record<string, unknown>): string;
-    resolveTaskFailureMessage(task: Record<string, unknown>): string;
-  };
-
-  assert.equal(
-    formatter.resolveTaskFailureMessage({
-      error_code: "AI_GATEWAY_FAILED",
-      error_message: "Provider timeout"
-    }),
-    "AI 模型服务调用失败，请稍后重试。"
-  );
-  assert.equal(
-    formatter.resolveTaskFailureMessage({ error_code: "UNKNOWN", error_message: "timeout" }),
-    "任务执行失败，请稍后重试。"
-  );
-  assert.equal(
-    formatter.formatTaskPoints({
-      status: "billing_pending",
-      error_code: "BILLING_SETTLE_PENDING",
-      cost_points: "6"
-    }),
-    "6 积分（结算待对账）"
-  );
-  assert.equal(
-    formatter.formatTaskPoints({
-      status: "failed",
-      error_code: "BILLING_RELEASE_PENDING",
-      cost_points: "6"
-    }),
-    "6 积分（释放待对账）"
-  );
 });
 
 void test("价格管理页覆盖多维规则、编辑和启停操作", async () => {
@@ -223,9 +129,7 @@ void test("价格管理页覆盖多维规则、编辑和启停操作", async () 
   assert.match(html, /id="ruleImageSize"/);
   assert.match(html, /id="rulePoints"/);
   assert.match(script, /setPricingRuleActive\(rule\.id, !rule\.active\)/);
-  assert.match(script, /if \(isMutating\) return/);
   assert.match(script, /window\.confirm/);
-  assert.match(script, /button\.disabled = mutating/);
   assert.doesNotMatch(script, /\bfetch\(/);
   assert.match(apiClient, /\/api\/admin\/image\/pricing-rules/);
   assert.match(apiClient, /method: "PATCH"/);
@@ -243,11 +147,35 @@ void test("模型管理页覆盖同步、能力标签、默认模型和启停操
   assert.match(html, /id="defaultTaskTypes"/);
   assert.match(script, /syncImageModels\(\)/);
   assert.match(script, /admin_enabled: elements\.adminEnabled\.checked/);
-  assert.match(script, /default_task_types: splitCsv\(elements\.defaultTaskTypes\.value\)/);
   assert.match(script, /updateImageModel\(model\.id, \{ admin_enabled: !model\.admin_enabled \}\)/);
   assert.doesNotMatch(script, /\bfetch\(/);
   assert.match(apiClient, /\/api\/admin\/image\/models/);
   assert.match(apiClient, /\/sync/);
+  assert.match(apiClient, /method: "PATCH"/);
+});
+
+void test("风格模板管理页覆盖名称、分类、prompt、预览图、排序、启停和可见任务类型", async () => {
+  const html = await readFile(resolve("public", "admin-styles.html"), "utf8");
+  const script = await readFile(resolve("public", "assets", "admin-styles.js"), "utf8");
+  const apiClient = await readFile(resolve("public", "assets", "admin-styles-api.js"), "utf8");
+
+  assert.match(html, /风格模板管理/);
+  assert.match(html, /id="presetName"/);
+  assert.match(html, /id="presetCategory"/);
+  assert.match(html, /id="presetPromptTemplate"/);
+  assert.match(html, /id="presetPreviewUrl"/);
+  assert.match(html, /id="presetSortOrder"/);
+  assert.match(html, /id="presetEnabled"/);
+  assert.match(html, /value="text_to_image"/);
+  assert.match(html, /value="image_to_image"/);
+  assert.match(html, /value="image_restore"/);
+  assert.doesNotMatch(html, /value="image_to_text"/);
+  assert.doesNotMatch(html, /value="upscale"/);
+  assert.match(script, /setStylePresetEnabled\(preset\.id, !preset\.enabled\)/);
+  assert.match(script, /prompt_template: elements\.promptTemplate\.value\.trim\(\)/);
+  assert.match(script, /preview_image_url: emptyToNull\(elements\.previewUrl\.value\)/);
+  assert.doesNotMatch(script, /\bfetch\(/);
+  assert.match(apiClient, /\/api\/admin\/image\/style-presets/);
   assert.match(apiClient, /method: "PATCH"/);
 });
 

@@ -17,6 +17,7 @@ import { MySqlFilesRepository } from "../infrastructure/database/files-repositor
 import { MySqlImageModelConfigsRepository } from "../infrastructure/database/image-model-configs-repository.js";
 import { MySqlImageTasksRepository } from "../infrastructure/database/image-tasks-repository.js";
 import { MySqlPricingRulesRepository } from "../infrastructure/database/pricing-rules-repository.js";
+import { MySqlStylePresetsRepository } from "../infrastructure/database/style-presets-repository.js";
 import { MolingClient } from "../infrastructure/moling/moling-client.js";
 import { MinioStorageService } from "../infrastructure/storage/minio-storage-service.js";
 import { BillingService } from "../modules/billing/billing-service.js";
@@ -26,6 +27,7 @@ import { ConsolePricingRuleAuditLogger } from "../infrastructure/audit/console-p
 import { FileService } from "../modules/files/file-service.js";
 import { ImageModelService } from "../modules/image-models/image-model-service.js";
 import { ImageTaskService } from "../modules/image-tasks/image-task-service.js";
+import { StylePresetService } from "../modules/style-presets/style-preset-service.js";
 import { ImageGenerationWorkerService } from "../workers/image-generation-worker-service.js";
 
 const config = loadConfigOrExit();
@@ -36,6 +38,7 @@ const imageTasksRepository = new MySqlImageTasksRepository(databasePool);
 const imageModelConfigsRepository = new MySqlImageModelConfigsRepository(databasePool);
 const billingEventsRepository = new MySqlBillingEventsRepository(databasePool);
 const pricingRulesRepository = new MySqlPricingRulesRepository(databasePool);
+const stylePresetsRepository = new MySqlStylePresetsRepository(databasePool);
 const aiGatewayCallLogsRepository = new MySqlAiGatewayCallLogsRepository(databasePool);
 const storageService = new MinioStorageService(config);
 const fileService = new FileService(filesRepository, storageService, config);
@@ -54,12 +57,14 @@ const billingService = new BillingService(
 );
 const pricingRuleAuditLogger = new ConsolePricingRuleAuditLogger();
 const pricingRuleService = new PricingRuleService(pricingRulesRepository, pricingRuleAuditLogger);
+const stylePresetService = new StylePresetService(stylePresetsRepository);
 const imageTaskAuditLogger = new ConsoleImageTaskAuditLogger();
 const imageTaskService = new ImageTaskService(
   imageTasksRepository,
   billingService,
   imageTaskAuditLogger,
-  imageModelService
+  imageModelService,
+  stylePresetService
 );
 const imageGenerationClient = new HttpAiGatewayImageGenerationClient(config);
 const imageEditClient = new HttpAiGatewayImageEditClient(config);
@@ -71,7 +76,8 @@ const imageGenerationWorkerService = new ImageGenerationWorkerService(
   imageGenerationClient,
   aiGatewayCallLogsRepository,
   visionTextClient,
-  imageEditClient
+  imageEditClient,
+  stylePresetService
 );
 
 const server = createServer(
@@ -82,6 +88,7 @@ const server = createServer(
     imageTaskService,
     billingService,
     pricingRuleService,
+    stylePresetService,
     imageGenerationWorkerService
   })
 );

@@ -6,6 +6,12 @@ export async function getImageModels() {
   return await requestJson("/api/image/models");
 }
 
+export async function getStylePresets(taskType = "") {
+  const query = taskType.length > 0 ? `?task_type=${encodeURIComponent(taskType)}` : "";
+
+  return await requestJson(`/api/image/style-presets${query}`);
+}
+
 export async function estimateBilling(input) {
   return await requestJson("/api/billing/estimate", {
     method: "POST",

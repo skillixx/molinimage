@@ -55,12 +55,16 @@ void test("文生图 worker 调用 AI 网关、保存结果文件、写日志并
     storagePresignedUrlTtlSeconds: 300
   });
   const taskService = new ImageTaskService(taskRepository);
+  const stylePresetResolver = new FakeWorkerStylePresetResolver();
   const worker = new ImageGenerationWorkerService(
     taskRepository,
     taskService,
     fileService,
     aiGateway,
-    aiLogs
+    aiLogs,
+    undefined,
+    undefined,
+    stylePresetResolver
   );
   const task = await taskRepository.create({
     id: "task_text_to_image_001",
@@ -69,7 +73,7 @@ void test("文生图 worker 调用 AI 网关、保存结果文件、写日志并
     status: "billing_reserved",
     prompt: "一张蓝色科技海报",
     negative_prompt: null,
-    style_preset_id: null,
+    style_preset_id: "tti_product_poster",
     input_file_ids: [],
     gateway_model_code: "image-gen-default",
     gateway_capability: "image_generation",
@@ -97,6 +101,8 @@ void test("文生图 worker 调用 AI 网关、保存结果文件、写日志并
   );
   assert.equal(previewUrls[0]?.download_url, previewUrls[0]?.preview_url);
   assert.equal(aiGateway.inputs[0]?.model, "image-gen-default");
+  assert.match(aiGateway.inputs[0]?.prompt ?? "", /商业摄影模板/);
+  assert.match(aiGateway.inputs[0]?.prompt ?? "", /一张蓝色科技海报/);
   assert.equal(aiGateway.inputs[0]?.count, 1);
   assert.equal(aiLogs.records.length, 1);
   assert.equal(aiLogs.records[0]?.task_id, task.id);
@@ -771,6 +777,14 @@ class FakeBillingService {
 
   settle(): Promise<SettleBillingResult> {
     return Promise.reject(new Error("失败 worker 测试不需要结算预占"));
+  }
+}
+
+class FakeWorkerStylePresetResolver {
+  getEnabledPresetForTask() {
+    return Promise.resolve({
+      prompt_template: "商业摄影模板，产品主体清晰，背景干净。"
+    });
   }
 }
 
