@@ -15,7 +15,8 @@ const requiredTables = [
   "user_collections",
   "pricing_rules",
   "image_model_configs",
-  "image_model_defaults"
+  "image_model_defaults",
+  "billing_reconciliation_attempts"
 ];
 const requiredIndexes = [
   "uk_image_tasks_idempotency_key",
@@ -35,7 +36,9 @@ const requiredIndexes = [
   "uk_image_model_configs_source",
   "idx_image_model_configs_visible",
   "idx_image_model_defaults_model",
-  "idx_style_presets_task_category_enabled_sort"
+  "idx_style_presets_task_category_enabled_sort",
+  "idx_billing_reconciliation_task_created",
+  "idx_billing_reconciliation_result_created"
 ];
 
 void test("基础表 migration 包含 P1-G02 要求的表、引擎、字符集和关键索引", async () => {
@@ -187,6 +190,25 @@ void test("风格模板 migration 支持分类、预览图、排序启停和默�
   assert.match(upSql, /old_photo/i);
   assert.match(downSql, /DROP COLUMN preview_image_url/i);
   assert.match(downSql, /DROP COLUMN category/i);
+});
+
+void test("对账管理 migration 支持重试结算、重试释放和结果记录", async () => {
+  const upSql = await readFile(
+    resolve("migrations", "011_create_billing_reconciliation_attempts.up.sql"),
+    "utf8"
+  );
+  const downSql = await readFile(
+    resolve("migrations", "011_create_billing_reconciliation_attempts.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /CREATE TABLE IF NOT EXISTS billing_reconciliation_attempts/i);
+  assert.match(upSql, /retry_settle/i);
+  assert.match(upSql, /retry_release/i);
+  assert.match(upSql, /before_error_code/i);
+  assert.match(upSql, /after_error_code/i);
+  assert.match(upSql, /idx_billing_reconciliation_task_created/i);
+  assert.match(downSql, /DROP TABLE IF EXISTS billing_reconciliation_attempts/i);
 });
 
 async function readAllUpMigrations(): Promise<string> {

@@ -67,6 +67,7 @@ export interface ReleaseBillingRequest {
   idempotencyKey: string;
   reasonCode: string;
   reasonMessage: string;
+  retryPending?: boolean;
 }
 
 export interface ReleaseBillingResult {
@@ -98,6 +99,8 @@ export interface PublicBillingEvent {
   idempotency_key: string;
   moling_reserve_id: string | null;
   moling_entitlement_id: number | null;
+  error_code: string | null;
+  error_message: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -331,6 +334,25 @@ export class BillingService {
   async release(request: ReleaseBillingRequest): Promise<ReleaseBillingResult> {
     const existingRelease = await this.repository.findByIdempotencyKey(request.idempotencyKey);
 
+    if (
+      existingRelease !== undefined &&
+      request.retryPending === true &&
+      existingRelease.status !== "released"
+    ) {
+      const retryClaim = await this.repository.claimRelease({
+        idempotencyKey: request.idempotencyKey
+      });
+
+      if (!retryClaim.claimed) {
+        return {
+          billing_event: toPublicBillingEvent(retryClaim.event),
+          released: retryClaim.event.status === "released"
+        };
+      }
+
+      return await this.retryClaimedRelease(retryClaim.event);
+    }
+
     if (existingRelease !== undefined) {
       // 已经释放过的失败任务直接返回原事件，确保 worker 重放或接口重试不会重复归还额度。
       return {
@@ -402,6 +424,58 @@ export class BillingService {
         moling_entitlement_id: reserveEvent.moling_entitlement_id,
         error_code: "BILLING_RELEASE_FAILED",
         error_message: error instanceof Error ? error.message : "积分释放失败，等待对账。"
+      });
+
+      return {
+        billing_event: toPublicBillingEvent(event),
+        released: false
+      };
+    }
+  }
+
+  private async retryClaimedRelease(
+    releaseEvent: BillingEventRecord
+  ): Promise<ReleaseBillingResult> {
+    if (releaseEvent.moling_reserve_id === null) {
+      const event = await this.repository.completeRelease({
+        eventId: releaseEvent.id,
+        expectedRetryCount: releaseEvent.retry_count,
+        status: "release_pending",
+        errorCode: "BILLING_RESERVE_HOLD_MISSING",
+        errorMessage: "释放事件缺少 hold_id，无法重试释放。"
+      });
+
+      return {
+        billing_event: toPublicBillingEvent(event),
+        released: false
+      };
+    }
+
+    try {
+      await this.gateway.release({
+        reserveId: releaseEvent.moling_reserve_id
+      });
+
+      const event = await this.repository.completeRelease({
+        eventId: releaseEvent.id,
+        expectedRetryCount: releaseEvent.retry_count,
+        status: "released",
+        errorCode: null,
+        errorMessage: null
+      });
+
+      return {
+        billing_event: toPublicBillingEvent(event),
+        released: event.status === "released"
+      };
+    } catch (error: unknown) {
+      // 管理端重试释放失败时保留 release_pending，便于继续对账并追踪最近一次失败原因。
+      const event = await this.repository.completeRelease({
+        eventId: releaseEvent.id,
+        expectedRetryCount: releaseEvent.retry_count,
+        status: "release_pending",
+        errorCode: "BILLING_RELEASE_FAILED",
+        errorMessage: error instanceof Error ? error.message : "积分释放失败，等待对账。"
       });
 
       return {
@@ -698,6 +772,8 @@ function toPublicBillingEvent(event: BillingEventRecord): PublicBillingEvent {
     idempotency_key: event.idempotency_key,
     moling_reserve_id: event.moling_reserve_id,
     moling_entitlement_id: event.moling_entitlement_id,
+    error_code: event.error_code,
+    error_message: event.error_message,
     created_at: event.created_at,
     updated_at: event.updated_at
   };

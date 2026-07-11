@@ -1,0 +1,21 @@
+.admin-reconciliation-layout {
+  width: min(1180px, calc(100% - 32px));
+  margin: 24px auto 48px;
+}
+
+.admin-reconciliation-layout td {
+  white-space: pre-line;
+  vertical-align: top;
+}
+
+.admin-reconciliation-layout .admin-row-actions {
+  min-width: 108px;
+}
+
+.reconciliation-pager {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+  color: var(--muted);
+}

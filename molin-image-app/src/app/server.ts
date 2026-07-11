@@ -11,6 +11,7 @@ import {
   HttpAiGatewayVisionTextClient
 } from "../infrastructure/ai/ai-gateway-client.js";
 import { MySqlAiGatewayCallLogsRepository } from "../infrastructure/database/ai-gateway-call-logs-repository.js";
+import { MySqlBillingReconciliationRepository } from "../infrastructure/database/billing-reconciliation-repository.js";
 import { MySqlBillingEventsRepository } from "../infrastructure/database/billing-events-repository.js";
 import { createDatabasePool } from "../infrastructure/database/database-pool.js";
 import { MySqlFilesRepository } from "../infrastructure/database/files-repository.js";
@@ -21,6 +22,7 @@ import { MySqlStylePresetsRepository } from "../infrastructure/database/style-pr
 import { MolingClient } from "../infrastructure/moling/moling-client.js";
 import { MinioStorageService } from "../infrastructure/storage/minio-storage-service.js";
 import { BillingService } from "../modules/billing/billing-service.js";
+import { BillingReconciliationService } from "../modules/billing/billing-reconciliation-service.js";
 import { PricingRuleService } from "../modules/billing/pricing-rule-service.js";
 import { ConsoleImageTaskAuditLogger } from "../infrastructure/audit/console-image-task-audit-logger.js";
 import { ConsolePricingRuleAuditLogger } from "../infrastructure/audit/console-pricing-rule-audit-logger.js";
@@ -37,6 +39,7 @@ const filesRepository = new MySqlFilesRepository(databasePool);
 const imageTasksRepository = new MySqlImageTasksRepository(databasePool);
 const imageModelConfigsRepository = new MySqlImageModelConfigsRepository(databasePool);
 const billingEventsRepository = new MySqlBillingEventsRepository(databasePool);
+const billingReconciliationRepository = new MySqlBillingReconciliationRepository(databasePool);
 const pricingRulesRepository = new MySqlPricingRulesRepository(databasePool);
 const stylePresetsRepository = new MySqlStylePresetsRepository(databasePool);
 const aiGatewayCallLogsRepository = new MySqlAiGatewayCallLogsRepository(databasePool);
@@ -66,6 +69,12 @@ const imageTaskService = new ImageTaskService(
   imageModelService,
   stylePresetService
 );
+const billingReconciliationService = new BillingReconciliationService(
+  billingReconciliationRepository,
+  imageTasksRepository,
+  imageTaskService,
+  billingService
+);
 const imageGenerationClient = new HttpAiGatewayImageGenerationClient(config);
 const imageEditClient = new HttpAiGatewayImageEditClient(config);
 const visionTextClient = new HttpAiGatewayVisionTextClient(config);
@@ -87,6 +96,7 @@ const server = createServer(
     imageModelService,
     imageTaskService,
     billingService,
+    billingReconciliationService,
     pricingRuleService,
     stylePresetService,
     imageGenerationWorkerService

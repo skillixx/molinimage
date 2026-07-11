@@ -6,6 +6,8 @@ import { extname, normalize, resolve, sep } from "node:path";
 import type { AppConfig } from "../config/app-config.js";
 import type { BillingService } from "../modules/billing/billing-service.js";
 import { BillingServiceError } from "../modules/billing/billing-service.js";
+import type { BillingReconciliationService } from "../modules/billing/billing-reconciliation-service.js";
+import { BillingReconciliationServiceError } from "../modules/billing/billing-reconciliation-service.js";
 import type {
   PricingRuleAuditContext,
   PricingRuleService,
@@ -61,6 +63,10 @@ export interface AppDependencies {
     | "transitionTask"
   >;
   billingService?: Pick<BillingService, "estimate">;
+  billingReconciliationService?: Pick<
+    BillingReconciliationService,
+    "listPending" | "retryRelease" | "retrySettle"
+  >;
   pricingRuleService?: Pick<PricingRuleService, "listRules" | "createRule" | "updateRule">;
   stylePresetService?: Pick<
     StylePresetService,
@@ -133,6 +139,21 @@ async function handleRequest(
     }
 
     await servePublicFile(response, requestId, "admin-styles.html");
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/admin/reconciliation") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有对账管理权限。");
+      return;
+    }
+
+    await servePublicFile(response, requestId, "admin-reconciliation.html");
     return;
   }
 
@@ -536,6 +557,75 @@ async function handleRequest(
       requestId,
       session.user_id,
       dependencies.billingService
+    );
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/admin/image/billing-reconciliation") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有对账管理权限。");
+      return;
+    }
+
+    if (dependencies.billingReconciliationService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "BILLING_RECONCILIATION_SERVICE_UNAVAILABLE",
+        "对账管理服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleBillingReconciliationList(
+      url,
+      response,
+      requestId,
+      dependencies.billingReconciliationService
+    );
+    return;
+  }
+
+  const billingReconciliationActionMatch =
+    /^\/api\/admin\/image\/billing-reconciliation\/([^/]+)\/(retry-settle|retry-release)$/u.exec(
+      url.pathname
+    );
+
+  if (request.method === "POST" && billingReconciliationActionMatch !== null) {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有对账管理权限。");
+      return;
+    }
+
+    if (dependencies.billingReconciliationService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "BILLING_RECONCILIATION_SERVICE_UNAVAILABLE",
+        "对账管理服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleBillingReconciliationAction(
+      response,
+      requestId,
+      session.user_id,
+      decodeURIComponent(billingReconciliationActionMatch[1]),
+      billingReconciliationActionMatch[2],
+      dependencies.billingReconciliationService
     );
     return;
   }
@@ -1198,6 +1288,44 @@ async function handleTransitionImageTask(
   }
 }
 
+async function handleBillingReconciliationList(
+  url: URL,
+  response: ServerResponse,
+  requestId: string,
+  reconciliationService: Pick<BillingReconciliationService, "listPending">
+): Promise<void> {
+  try {
+    const result = await reconciliationService.listPending({
+      page: readPositiveIntegerQuery(url, "page", 1),
+      pageSize: readPositiveIntegerQuery(url, "page_size", 20)
+    });
+
+    writeJson(response, 200, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+async function handleBillingReconciliationAction(
+  response: ServerResponse,
+  requestId: string,
+  actorUserId: number,
+  taskId: string,
+  action: string,
+  reconciliationService: Pick<BillingReconciliationService, "retryRelease" | "retrySettle">
+): Promise<void> {
+  try {
+    const result =
+      action === "retry-settle"
+        ? await reconciliationService.retrySettle({ actorUserId, taskId, requestId })
+        : await reconciliationService.retryRelease({ actorUserId, taskId, requestId });
+
+    writeJson(response, 200, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
 async function handleFileUpload(
   request: IncomingMessage,
   response: ServerResponse,
@@ -1606,6 +1734,11 @@ function writePublicError(response: ServerResponse, requestId: string, error: un
   }
 
   if (error instanceof BillingServiceError) {
+    writeError(response, error.statusCode, requestId, error.code, error.message);
+    return;
+  }
+
+  if (error instanceof BillingReconciliationServiceError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
     return;
   }

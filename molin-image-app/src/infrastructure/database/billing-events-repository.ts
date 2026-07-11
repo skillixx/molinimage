@@ -40,6 +40,18 @@ export interface CreateReleaseBillingEventInput {
   error_message: string | null;
 }
 
+export interface ClaimReleaseBillingEventInput {
+  idempotencyKey: string;
+}
+
+export interface CompleteReleaseBillingEventInput {
+  eventId: string;
+  expectedRetryCount: number;
+  status: "released" | "release_pending";
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
 export interface ClaimSettleBillingEventInput {
   id: string;
   owner_user_id: number;
@@ -66,6 +78,10 @@ export interface BillingEventsRepository {
   ): Promise<{ event: BillingEventRecord; claimed: boolean }>;
   completeSettle(input: CompleteSettleBillingEventInput): Promise<BillingEventRecord>;
   createRelease(input: CreateReleaseBillingEventInput): Promise<BillingEventRecord>;
+  claimRelease(
+    input: ClaimReleaseBillingEventInput
+  ): Promise<{ event: BillingEventRecord; claimed: boolean }>;
+  completeRelease(input: CompleteReleaseBillingEventInput): Promise<BillingEventRecord>;
   findById(eventId: string): Promise<BillingEventRecord | undefined>;
   findByIdempotencyKey(idempotencyKey: string): Promise<BillingEventRecord | undefined>;
 }
@@ -166,6 +182,75 @@ export class MySqlBillingEventsRepository implements BillingEventsRepository {
     }
 
     return createdEvent;
+  }
+
+  async claimRelease(
+    input: ClaimReleaseBillingEventInput
+  ): Promise<{ event: BillingEventRecord; claimed: boolean }> {
+    const existingEvent = await this.findByIdempotencyKey(input.idempotencyKey);
+
+    if (existingEvent?.event_type !== "release") {
+      return {
+        event:
+          existingEvent ??
+          ({
+            id: "",
+            owner_user_id: 0,
+            task_id: "",
+            event_type: "release",
+            amount_points: "0",
+            status: "missing",
+            idempotency_key: input.idempotencyKey,
+            moling_reserve_id: null,
+            moling_entitlement_id: null,
+            error_code: "BILLING_RELEASE_EVENT_NOT_FOUND",
+            error_message: "释放事件不存在。",
+            retry_count: 0,
+            created_at: "",
+            updated_at: ""
+          } satisfies BillingEventRecord),
+        claimed: false
+      };
+    }
+
+    if (existingEvent.status === "released") {
+      return { event: existingEvent, claimed: false };
+    }
+
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE billing_events
+       SET status = 'releasing', retry_count = retry_count + 1, error_code = NULL, error_message = NULL
+       WHERE id = ?
+        AND (
+          status = 'release_pending'
+          OR (status = 'releasing' AND updated_at < DATE_SUB(UTC_TIMESTAMP(3), INTERVAL 5 MINUTE))
+        )`,
+      [existingEvent.id]
+    );
+    const claimedEvent = await this.findById(existingEvent.id);
+
+    if (claimedEvent === undefined) {
+      throw new Error("释放事件重试抢占后回读失败。");
+    }
+
+    // release 重试也用 CAS 抢占，避免多个管理员或定时任务同时归还同一个 hold。
+    return { event: claimedEvent, claimed: result.affectedRows === 1 };
+  }
+
+  async completeRelease(input: CompleteReleaseBillingEventInput): Promise<BillingEventRecord> {
+    await this.pool.execute<ResultSetHeader>(
+      `UPDATE billing_events
+       SET status = ?, error_code = ?, error_message = ?
+       WHERE id = ? AND status = 'releasing' AND retry_count = ?`,
+      [input.status, input.errorCode, input.errorMessage, input.eventId, input.expectedRetryCount]
+    );
+    const completedEvent = await this.findById(input.eventId);
+
+    if (completedEvent === undefined) {
+      throw new Error("释放事件完成后回读失败。");
+    }
+
+    return completedEvent;
   }
 
   async claimSettle(

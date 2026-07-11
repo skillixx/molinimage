@@ -179,6 +179,30 @@ void test("风格模板管理页覆盖名称、分类、prompt、预览图、排
   assert.match(apiClient, /method: "PATCH"/);
 });
 
+void test("对账管理页覆盖待对账列表、重试结算、重试释放和结果追踪", async () => {
+  const html = await readFile(resolve("public", "admin-reconciliation.html"), "utf8");
+  const script = await readFile(resolve("public", "assets", "admin-reconciliation.js"), "utf8");
+  const apiClient = await readFile(
+    resolve("public", "assets", "admin-reconciliation-api.js"),
+    "utf8"
+  );
+
+  assert.match(html, /对账管理/);
+  assert.match(html, /id="reconciliationRows"/);
+  assert.match(html, /id="reconciliationPrev"/);
+  assert.match(html, /id="reconciliationNext"/);
+  assert.match(script, /retrySettleTask\(task\.id\)/);
+  assert.match(script, /retryReleaseTask\(task\.id\)/);
+  assert.match(script, /pageSize = 20/);
+  assert.match(script, /latest_reconciliation_result/);
+  assert.match(script, /latest_billing_event_error_message/);
+  assert.doesNotMatch(script, /\bfetch\(/);
+  assert.match(apiClient, /\/api\/admin\/image\/billing-reconciliation/);
+  assert.match(apiClient, /page_size/);
+  assert.match(apiClient, /retry-settle/);
+  assert.match(apiClient, /retry-release/);
+});
+
 class FakeLaunchTicketVerifier implements LaunchTicketVerifier {
   verifyLaunchTicket(): Promise<MolingLaunchIdentity> {
     return Promise.resolve({

@@ -15,6 +15,8 @@ import {
   MockEntitlementReserveGateway
 } from "../src/modules/billing/billing-service.js";
 import type {
+  EntitlementReleaseInput,
+  EntitlementReleaseResult,
   EntitlementSettleInput,
   EntitlementSettleResult
 } from "../src/modules/billing/billing-service.js";
@@ -292,6 +294,38 @@ void test("失败释放会归还预占积分，并用 release 幂等键防重复
   assert.equal(repository.events.filter((event) => event.event_type === "release").length, 1);
 });
 
+void test("释放待对账事件可由管理端重试并完成", async () => {
+  const repository = new InMemoryBillingEventsRepository();
+  const gateway = new FlakyReleaseGateway("100");
+  const service = new BillingService(rulesJson, repository, gateway);
+  const reserved = await service.reserve({
+    ownerUserId: 479,
+    taskId: "task_release_reconcile_001",
+    taskType: "text_to_image",
+    imageCount: 1,
+    entitlementId: 62,
+    idempotencyKey: "task_release_reconcile_001:text_to_image:reserve"
+  });
+  const releaseRequest = {
+    ownerUserId: 479,
+    taskId: "task_release_reconcile_001",
+    reserveBillingEventId: reserved.billing_event.id,
+    idempotencyKey: "task_release_reconcile_001:text_to_image:release",
+    reasonCode: "AI_GATEWAY_FAILED",
+    reasonMessage: "AI 网关调用失败。"
+  };
+
+  const pending = await service.release(releaseRequest);
+  gateway.allowRelease();
+  const retried = await service.release({ ...releaseRequest, retryPending: true });
+
+  assert.equal(pending.released, false);
+  assert.equal(pending.billing_event.status, "release_pending");
+  assert.equal(retried.released, true);
+  assert.equal(retried.billing_event.status, "released");
+  assert.equal(repository.events.find((event) => event.event_type === "release")?.retry_count, 1);
+});
+
 void test("成功结算使用稳定幂等键且不会重复写入 settle 事件", async () => {
   const repository = new InMemoryBillingEventsRepository();
   const gateway = new MockEntitlementReserveGateway("100");
@@ -482,6 +516,56 @@ class InMemoryBillingEventsRepository implements BillingEventsRepository {
     return Promise.resolve(event);
   }
 
+  claimRelease(input: {
+    idempotencyKey: string;
+  }): Promise<{ event: BillingEventRecord; claimed: boolean }> {
+    const existing = this.events.find((event) => event.idempotency_key === input.idempotencyKey);
+
+    if (existing?.event_type !== "release") {
+      return Promise.reject(new Error("释放事件不存在"));
+    }
+
+    if (existing.status === "released") {
+      return Promise.resolve({ event: existing, claimed: false });
+    }
+
+    // 对账重试释放时只有一个调用者能把 release_pending 抢占成 releasing。
+    if (existing.status === "release_pending") {
+      existing.status = "releasing";
+      existing.retry_count += 1;
+      existing.error_code = null;
+      existing.error_message = null;
+
+      return Promise.resolve({ event: existing, claimed: true });
+    }
+
+    return Promise.resolve({ event: existing, claimed: false });
+  }
+
+  completeRelease(input: {
+    eventId: string;
+    expectedRetryCount: number;
+    status: "released" | "release_pending";
+    errorCode: string | null;
+    errorMessage: string | null;
+  }): Promise<BillingEventRecord> {
+    const event = this.events.find((item) => item.id === input.eventId);
+
+    if (event === undefined) {
+      return Promise.reject(new Error("释放事件不存在"));
+    }
+
+    if (event.status !== "releasing" || event.retry_count !== input.expectedRetryCount) {
+      return Promise.resolve(event);
+    }
+
+    event.status = input.status;
+    event.error_code = input.errorCode;
+    event.error_message = input.errorMessage;
+
+    return Promise.resolve(event);
+  }
+
   claimSettle(
     input: ClaimSettleBillingEventInput
   ): Promise<{ event: BillingEventRecord; claimed: boolean }> {
@@ -561,6 +645,22 @@ class FlakySettleGateway extends MockEntitlementReserveGateway {
     }
 
     return super.settle(input);
+  }
+}
+
+class FlakyReleaseGateway extends MockEntitlementReserveGateway {
+  private shouldFail = true;
+
+  allowRelease(): void {
+    this.shouldFail = false;
+  }
+
+  override release(input: EntitlementReleaseInput): Promise<EntitlementReleaseResult> {
+    if (this.shouldFail) {
+      return Promise.reject(new Error("模拟释放失败"));
+    }
+
+    return super.release(input);
   }
 }
 

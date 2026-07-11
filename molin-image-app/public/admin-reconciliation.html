@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>对账管理 - 墨灵 AI 图片创作</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/admin-pricing.css" />
+    <link rel="stylesheet" href="/assets/admin-reconciliation.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">MI</div>
+        <div>
+          <h1>对账管理</h1>
+          <p>处理结算待对账和释放失败任务</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <a class="ghost-button admin-back" href="/admin/pricing">价格规则</a>
+        <a class="ghost-button admin-back" href="/admin/models">模型管理</a>
+        <a class="ghost-button admin-back" href="/admin/styles">风格模板</a>
+        <a class="ghost-button admin-back" href="/">返回工作台</a>
+      </div>
+    </header>
+    <main class="admin-reconciliation-layout">
+      <section class="admin-rule-list" aria-labelledby="reconciliationTitle">
+        <div class="panel-heading compact">
+          <p class="eyebrow">BILLING RECONCILIATION</p>
+          <h2 id="reconciliationTitle">待对账任务</h2>
+        </div>
+        <div id="reconciliationError" class="error-banner" hidden></div>
+        <div class="reconciliation-pager">
+          <button id="reconciliationPrev" class="ghost-button" type="button">上一页</button>
+          <span id="reconciliationPageInfo">第 1 页</span>
+          <button id="reconciliationNext" class="ghost-button" type="button">下一页</button>
+        </div>
+        <div class="admin-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>状态</th>
+                <th>积分</th>
+                <th>失败原因</th>
+                <th>最近对账</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="reconciliationRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/assets/admin-reconciliation.js"></script>
+  </body>
+</html>

@@ -994,6 +994,8 @@ class FakeBillingService {
         idempotency_key: request.idempotencyKey,
         moling_reserve_id: "hold_001",
         moling_entitlement_id: request.entitlementId ?? null,
+        error_code: null,
+        error_message: null,
         created_at: "2026-07-09T00:00:00.000Z",
         updated_at: "2026-07-09T00:00:00.000Z"
       }
@@ -1015,6 +1017,8 @@ class FakeBillingService {
         idempotency_key: request.idempotencyKey,
         moling_reserve_id: "hold_001",
         moling_entitlement_id: 62,
+        error_code: null,
+        error_message: null,
         created_at: "2026-07-09T00:00:00.000Z",
         updated_at: "2026-07-09T00:00:00.000Z"
       }
@@ -1036,6 +1040,8 @@ class FakeBillingService {
         idempotency_key: request.idempotencyKey,
         moling_reserve_id: "hold_001",
         moling_entitlement_id: 62,
+        error_code: this.settleShouldSucceed ? null : "BILLING_SETTLE_FAILED",
+        error_message: this.settleShouldSucceed ? null : "模拟结算失败",
         created_at: "2026-07-09T00:00:00.000Z",
         updated_at: "2026-07-09T00:00:00.000Z"
       }

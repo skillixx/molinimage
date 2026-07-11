@@ -769,6 +769,8 @@ class FakeBillingService {
         idempotency_key: request.idempotencyKey,
         moling_reserve_id: "hold_storage_failed_001",
         moling_entitlement_id: 62,
+        error_code: null,
+        error_message: null,
         created_at: "2026-07-09T00:00:00.000Z",
         updated_at: "2026-07-09T00:00:00.000Z"
       }
