@@ -11,6 +11,7 @@ import type {
   SettleBillingResult
 } from "../billing/billing-service.js";
 import type { RiskControlService } from "../risk-control/risk-control-service.js";
+import { isSupportedImageRestoreType, isSupportedImageTaskType } from "./image-task-types.js";
 
 export type { ImageTaskStatus };
 
@@ -156,16 +157,6 @@ const imageTaskStatuses = new Set<ImageTaskStatus>([
   "cancelled"
 ]);
 
-const supportedTaskTypes = new Set([
-  "text_to_image",
-  "image_to_text",
-  "image_to_image",
-  "image_restore",
-  "upscale"
-]);
-
-const supportedImageRestoreTypes = new Set(["old_photo", "denoise", "deblur", "color_enhance"]);
-
 const allowedTransitions: ReadonlyMap<ImageTaskStatus, readonly ImageTaskStatus[]> = new Map([
   ["pending", ["billing_reserved", "queued", "failed", "cancelled"]],
   ["billing_reserved", ["queued", "billing_pending", "failed", "cancelled"]],
@@ -190,7 +181,7 @@ export class ImageTaskService {
   async createTask(request: CreateImageTaskRequest): Promise<ImageTaskResult> {
     const taskType = normalizeRequiredString(request.taskType, "task_type");
 
-    if (!supportedTaskTypes.has(taskType)) {
+    if (!isSupportedImageTaskType(taskType)) {
       throw new ImageTaskServiceError("TASK_TYPE_UNSUPPORTED", "当前不支持该图片任务类型。", 400);
     }
 
@@ -302,7 +293,7 @@ export class ImageTaskService {
 
       if (
         stylePresetId === null ||
-        (this.stylePresetResolver === undefined && !supportedImageRestoreTypes.has(stylePresetId))
+        (this.stylePresetResolver === undefined && !isSupportedImageRestoreType(stylePresetId))
       ) {
         // 修复类型在计费预占前收紧，防止非法字符串进入 worker 后静默降级并占用额度。
         throw new ImageTaskServiceError("IMAGE_RESTORE_TYPE_INVALID", "图片修复类型不合法。", 400);
@@ -524,7 +515,7 @@ export class ImageTaskService {
     const pageSize = normalizePageSize(input.pageSize ?? 20);
     const taskType = normalizeOptionalString(input.taskType);
 
-    if (taskType !== null && !supportedTaskTypes.has(taskType)) {
+    if (taskType !== null && !isSupportedImageTaskType(taskType)) {
       throw new ImageTaskServiceError("TASK_TYPE_UNSUPPORTED", "当前不支持该图片任务类型。", 400);
     }
 

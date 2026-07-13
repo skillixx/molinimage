@@ -16,44 +16,7 @@ import {
   formatTaskStatus,
   resolveTaskFailureMessage
 } from "./task-detail-format.js";
-
-const modeConfig = {
-  text_to_image: {
-    title: "文生图",
-    eyebrow: "TEXT TO IMAGE",
-    capability: "image_generation",
-    placeholder: "输入画面主题、风格、主体、背景和细节",
-    requiresUpload: false
-  },
-  image_to_text: {
-    title: "图生文",
-    eyebrow: "IMAGE TO TEXT",
-    capability: "vision_text",
-    placeholder: "可选：说明希望生成描述、标题、标签、商品文案或社媒文案",
-    requiresUpload: true
-  },
-  image_to_image: {
-    title: "图生图",
-    eyebrow: "IMAGE TO IMAGE",
-    capability: "image_edit",
-    placeholder: "描述需要保持、替换或增强的画面部分",
-    requiresUpload: true
-  },
-  image_restore: {
-    title: "图片修复",
-    eyebrow: "IMAGE RESTORE",
-    capability: "image_edit",
-    placeholder: "描述修复目标，例如去噪、增强清晰度、色彩修复",
-    requiresUpload: true
-  },
-  upscale: {
-    title: "高清放大",
-    eyebrow: "IMAGE UPSCALE",
-    capability: "image_edit",
-    placeholder: "高清放大将保持原图内容并增强细节",
-    requiresUpload: true
-  }
-};
+import { hasStylePresetSupport, modeConfig } from "./workbench-modes.js";
 
 const state = {
   mode: "text_to_image",
@@ -1040,12 +1003,6 @@ function renderStylePresetList() {
 
 function currentModeStylePresets() {
   return state.stylePresets.filter((preset) => preset.task_type === state.mode);
-}
-
-function hasStylePresetSupport(taskType) {
-  return (
-    taskType === "text_to_image" || taskType === "image_to_image" || taskType === "image_restore"
-  );
 }
 
 function currentStylePresetId() {
