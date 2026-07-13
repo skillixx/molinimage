@@ -10,6 +10,7 @@ import type {
   ReleaseBillingResult,
   SettleBillingResult
 } from "../billing/billing-service.js";
+import type { RiskControlService } from "../risk-control/risk-control-service.js";
 
 export type { ImageTaskStatus };
 
@@ -28,6 +29,8 @@ export interface CreateImageTaskRequest {
   upscaleFactor?: number;
   sourceTaskId?: string;
   idempotencyKey?: string;
+  requestId?: string;
+  requestIp?: string;
   entitlementId?: number;
   expectedPricingRuleId?: string | null;
   expectedPoints?: string;
@@ -180,7 +183,8 @@ export class ImageTaskService {
     private readonly billingService?: Pick<BillingService, "release" | "reserve" | "settle">,
     private readonly auditLogger?: ImageTaskAuditLogger,
     private readonly modelResolver?: ImageTaskModelResolver,
-    private readonly stylePresetResolver?: ImageTaskStylePresetResolver
+    private readonly stylePresetResolver?: ImageTaskStylePresetResolver,
+    private readonly riskControlService?: Pick<RiskControlService, "assertAllowed">
   ) {}
 
   async createTask(request: CreateImageTaskRequest): Promise<ImageTaskResult> {
@@ -341,6 +345,18 @@ export class ImageTaskService {
       });
     }
 
+    if (this.riskControlService !== undefined) {
+      // 风控必须在预占积分和写入任务之前完成，命中限流或高风险开关时不能产生计费事件，也不能让 worker 调用 AI 网关。
+      await this.riskControlService.assertAllowed({
+        requestId: normalizeOptionalString(request.requestId) ?? undefined,
+        ownerUserId: request.ownerUserId,
+        ipAddress: normalizeOptionalString(request.requestIp) ?? undefined,
+        taskType,
+        gatewayModelCode,
+        gatewayCapability
+      });
+    }
+
     const taskId = `task_${randomUUID().replaceAll("-", "")}`;
     const reserveIdempotencyKey = `${taskId}:${taskType}:reserve`;
     const reservedBilling =
@@ -450,7 +466,8 @@ export class ImageTaskService {
   async retryTask(
     ownerUserId: number,
     taskId: string,
-    entitlementId?: number
+    entitlementId?: number,
+    requestContext?: { requestId?: string; requestIp?: string }
   ): Promise<ImageTaskRetryResult> {
     const sourceTask = await this.repository.findById(normalizeRequiredString(taskId, "task_id"));
 
@@ -485,6 +502,8 @@ export class ImageTaskService {
       upscaleFactor: sourceTask.upscale_factor ?? undefined,
       sourceTaskId: sourceTask.source_task_id ?? undefined,
       entitlementId,
+      requestId: requestContext?.requestId,
+      requestIp: requestContext?.requestIp,
       // 一个失败任务只生成一个稳定 retry task；重复点击重试按钮会返回同一个任务，防止重复扣费。
       idempotencyKey: `retry:${sourceTask.id}`
     });

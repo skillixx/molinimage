@@ -16,7 +16,9 @@ const requiredTables = [
   "pricing_rules",
   "image_model_configs",
   "image_model_defaults",
-  "billing_reconciliation_attempts"
+  "billing_reconciliation_attempts",
+  "risk_control_events",
+  "risk_control_counters"
 ];
 const requiredIndexes = [
   "uk_image_tasks_idempotency_key",
@@ -38,7 +40,12 @@ const requiredIndexes = [
   "idx_image_model_defaults_model",
   "idx_style_presets_task_category_enabled_sort",
   "idx_billing_reconciliation_task_created",
-  "idx_billing_reconciliation_result_created"
+  "idx_billing_reconciliation_result_created",
+  "idx_risk_control_owner_created",
+  "idx_risk_control_ip_created",
+  "idx_risk_control_decision_created",
+  "idx_risk_control_reason_created",
+  "idx_risk_control_counters_updated"
 ];
 
 void test("基础表 migration 包含 P1-G02 要求的表、引擎、字符集和关键索引", async () => {
@@ -209,6 +216,43 @@ void test("对账管理 migration 支持重试结算、重试释放和结果记�
   assert.match(upSql, /after_error_code/i);
   assert.match(upSql, /idx_billing_reconciliation_task_created/i);
   assert.match(downSql, /DROP TABLE IF EXISTS billing_reconciliation_attempts/i);
+});
+
+void test("风控 migration 支持用户限流、IP 限流、高风险开关和审计查询", async () => {
+  const upSql = await readFile(
+    resolve("migrations", "012_create_risk_control_events.up.sql"),
+    "utf8"
+  );
+  const downSql = await readFile(
+    resolve("migrations", "012_create_risk_control_events.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /CREATE TABLE IF NOT EXISTS risk_control_events/i);
+  assert.match(upSql, /owner_user_id/i);
+  assert.match(upSql, /ip_address/i);
+  assert.match(upSql, /gateway_capability/i);
+  assert.match(upSql, /decision ENUM\('allow', 'block'\)/i);
+  assert.match(upSql, /idx_risk_control_owner_created/i);
+  assert.match(upSql, /idx_risk_control_ip_created/i);
+  assert.match(downSql, /DROP TABLE IF EXISTS risk_control_events/i);
+});
+
+void test("风控计数器 migration 支持窗口内原子限流", async () => {
+  const upSql = await readFile(
+    resolve("migrations", "013_create_risk_control_counters.up.sql"),
+    "utf8"
+  );
+  const downSql = await readFile(
+    resolve("migrations", "013_create_risk_control_counters.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /CREATE TABLE IF NOT EXISTS risk_control_counters/i);
+  assert.match(upSql, /subject_type ENUM\('user', 'ip'\)/i);
+  assert.match(upSql, /PRIMARY KEY \(subject_type, subject_key, bucket_start\)/i);
+  assert.match(upSql, /request_count INT UNSIGNED/i);
+  assert.match(downSql, /DROP TABLE IF EXISTS risk_control_counters/i);
 });
 
 async function readAllUpMigrations(): Promise<string> {

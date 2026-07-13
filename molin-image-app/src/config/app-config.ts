@@ -18,6 +18,12 @@ export interface AppConfig {
   imageModelRequiredCapabilities: string[];
   billingRulesJson: string;
   billingMockBalancePoints: string;
+  riskControlWindowSeconds: number;
+  riskControlUserLimit: number;
+  riskControlIpLimit: number;
+  riskControlDisabledTaskTypes: string[];
+  riskControlDisabledCapabilities: string[];
+  trustProxy: boolean;
   internalApiToken: string;
   adminUserIds?: number[];
   sessionCookieName: string;
@@ -63,6 +69,12 @@ type OptionalEnvKey =
   | "IMAGE_MODEL_REQUIRED_CAPABILITIES"
   | "BILLING_RULES_JSON"
   | "BILLING_MOCK_BALANCE_POINTS"
+  | "RISK_CONTROL_WINDOW_SECONDS"
+  | "RISK_CONTROL_USER_LIMIT"
+  | "RISK_CONTROL_IP_LIMIT"
+  | "RISK_CONTROL_DISABLED_TASK_TYPES"
+  | "RISK_CONTROL_DISABLED_CAPABILITIES"
+  | "TRUST_PROXY"
   | "AI_GATEWAY_API_KEY"
   | "MOLINIMAGE_ADMIN_USER_IDS";
 
@@ -112,6 +124,21 @@ export function loadAppConfig(env: AppEnv = process.env): AppConfig {
       `[{"task_type":"text_to_image","usage_type":"image_text_to_image","unit":"credits","points_per_unit":"6","active":true},{"task_type":"image_to_image","usage_type":"image_to_image","unit":"credits","points_per_unit":"8","active":true},{"task_type":"image_restore","usage_type":"image_restore","unit":"credits","points_per_unit":"5","active":true},{"task_type":"image_to_text","usage_type":"image_to_text","unit":"credits","points_per_unit":"1","active":true},{"task_type":"upscale","usage_type":"image_upscale","unit":"credits","points_per_unit":"4","upscale_factor":2,"active":true},{"task_type":"upscale","usage_type":"image_upscale","unit":"credits","points_per_unit":"8","upscale_factor":4,"active":true}]`
     ),
     billingMockBalancePoints: readOptionalText(env.BILLING_MOCK_BALANCE_POINTS, "1000000"),
+    riskControlWindowSeconds: readPositiveInteger(
+      env.RISK_CONTROL_WINDOW_SECONDS?.trim() ?? "60",
+      "RISK_CONTROL_WINDOW_SECONDS"
+    ),
+    riskControlUserLimit: readNonNegativeInteger(
+      env.RISK_CONTROL_USER_LIMIT?.trim() ?? "20",
+      "RISK_CONTROL_USER_LIMIT"
+    ),
+    riskControlIpLimit: readNonNegativeInteger(
+      env.RISK_CONTROL_IP_LIMIT?.trim() ?? "60",
+      "RISK_CONTROL_IP_LIMIT"
+    ),
+    riskControlDisabledTaskTypes: readCsvList(env.RISK_CONTROL_DISABLED_TASK_TYPES, ""),
+    riskControlDisabledCapabilities: readCsvList(env.RISK_CONTROL_DISABLED_CAPABILITIES, ""),
+    trustProxy: readBoolean(env.TRUST_PROXY, false),
     internalApiToken: readRequiredEnv(env, "INTERNAL_API_TOKEN"),
     adminUserIds: readPositiveIntegerList(env.MOLINIMAGE_ADMIN_USER_IDS),
     sessionCookieName: readOptionalText(env.SESSION_COOKIE_NAME, "molinimage_session"),
@@ -163,6 +190,17 @@ function readPositiveInteger(value: string, key: string): number {
   return parsedValue;
 }
 
+function readNonNegativeInteger(value: string, key: string): number {
+  const parsedValue = Number(value);
+
+  if (!Number.isInteger(parsedValue) || parsedValue < 0) {
+    // 风控限额允许配置为 0 表示完全关闭对应维度，但不能接受负数，避免误配置导致限流失效。
+    throw new Error(`${key} 必须是非负整数`);
+  }
+
+  return parsedValue;
+}
+
 function readOptionalText(value: string | undefined, defaultValue: string): string {
   const text = value?.trim();
 
@@ -201,6 +239,24 @@ function readSessionCookieSecure(env: AppEnv): boolean {
 
   // 生产默认打开 Secure，本地开发仍允许 HTTP 访问，避免联调时 cookie 写不进去。
   return env.APP_ENV?.trim() === "production";
+}
+
+function readBoolean(envValue: string | undefined, defaultValue: boolean): boolean {
+  const normalized = envValue?.trim().toLowerCase();
+
+  if (normalized === undefined || normalized.length === 0) {
+    return defaultValue;
+  }
+
+  if (normalized === "true") {
+    return true;
+  }
+
+  if (normalized === "false") {
+    return false;
+  }
+
+  throw new Error("布尔配置只能填写 true 或 false");
 }
 
 function isBlank(value: string | undefined): boolean {

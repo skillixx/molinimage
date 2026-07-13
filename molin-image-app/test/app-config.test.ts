@@ -24,6 +24,12 @@ const completeEnv = {
   BILLING_RULES_JSON:
     '[{"task_type":"text_to_image","usage_type":"image_text_to_image","unit":"credits","points_per_unit":"6","active":true}]',
   BILLING_MOCK_BALANCE_POINTS: "100",
+  RISK_CONTROL_WINDOW_SECONDS: "60",
+  RISK_CONTROL_USER_LIMIT: "20",
+  RISK_CONTROL_IP_LIMIT: "60",
+  RISK_CONTROL_DISABLED_TASK_TYPES: "image_restore",
+  RISK_CONTROL_DISABLED_CAPABILITIES: "upscale",
+  TRUST_PROXY: "true",
   INTERNAL_API_TOKEN: "replace_with_internal_api_token",
   SESSION_COOKIE_NAME: "molinimage_session",
   SESSION_COOKIE_SECURE: "false",
@@ -54,6 +60,12 @@ void test("配置完整时可以加载应用配置", () => {
     billingRulesJson:
       '[{"task_type":"text_to_image","usage_type":"image_text_to_image","unit":"credits","points_per_unit":"6","active":true}]',
     billingMockBalancePoints: "100",
+    riskControlWindowSeconds: 60,
+    riskControlUserLimit: 20,
+    riskControlIpLimit: 60,
+    riskControlDisabledTaskTypes: ["image_restore"],
+    riskControlDisabledCapabilities: ["upscale"],
+    trustProxy: true,
     internalApiToken: "replace_with_internal_api_token",
     adminUserIds: [],
     sessionCookieName: "molinimage_session",
@@ -61,6 +73,13 @@ void test("配置完整时可以加载应用配置", () => {
     sessionTtlSeconds: 86400,
     port: 3100
   });
+});
+
+void test("风控限额不允许配置为负数", () => {
+  assert.throws(
+    () => loadAppConfig({ ...completeEnv, RISK_CONTROL_USER_LIMIT: "-1" }),
+    /RISK_CONTROL_USER_LIMIT 必须是非负整数/
+  );
 });
 
 void test("缺少关键配置时返回明确缺失项", () => {

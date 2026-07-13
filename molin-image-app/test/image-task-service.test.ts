@@ -23,6 +23,7 @@ import {
   ImageTaskService,
   ImageTaskServiceError
 } from "../src/modules/image-tasks/image-task-service.js";
+import { RiskControlServiceError } from "../src/modules/risk-control/risk-control-service.js";
 
 void test("创建图片任务时必须绑定 owner_user_id，并从 pending 开始", async () => {
   const repository = new InMemoryImageTasksRepository();
@@ -108,6 +109,47 @@ void test("停用或不存在的风格模板不能创建任务且不会计费", 
       error instanceof ImageTaskServiceError && error.code === "STYLE_PRESET_UNAVAILABLE"
   );
 
+  assert.equal(billingService.reserveRequests.length, 0);
+  assert.equal(repository.records.size, 0);
+});
+
+void test("命中风控时不会预占积分或创建图片任务", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new FakeBillingService();
+  const riskControlService = new BlockingRiskControlService();
+  const service = new ImageTaskService(
+    repository,
+    billingService,
+    undefined,
+    undefined,
+    undefined,
+    riskControlService
+  );
+
+  await assert.rejects(
+    () =>
+      service.createTask({
+        ownerUserId: 479,
+        taskType: "text_to_image",
+        prompt: "一张产品海报",
+        requestId: "request_risk_001",
+        requestIp: "10.0.0.8",
+        entitlementId: 62
+      }),
+    (error: unknown) =>
+      error instanceof RiskControlServiceError && error.code === "RISK_USER_RATE_LIMITED"
+  );
+
+  assert.deepEqual(riskControlService.requests, [
+    {
+      requestId: "request_risk_001",
+      ownerUserId: 479,
+      ipAddress: "10.0.0.8",
+      taskType: "text_to_image",
+      gatewayModelCode: null,
+      gatewayCapability: null
+    }
+  ]);
   assert.equal(billingService.reserveRequests.length, 0);
   assert.equal(repository.records.size, 0);
 });
@@ -816,6 +858,32 @@ void test("作品历史删除使用软删除并从列表隐藏", async () => {
       error instanceof ImageTaskServiceError && error.code === "IMAGE_TASK_NOT_FOUND"
   );
 });
+
+class BlockingRiskControlService {
+  readonly requests: {
+    requestId?: string;
+    ownerUserId: number;
+    ipAddress?: string;
+    taskType: string;
+    gatewayModelCode?: string | null;
+    gatewayCapability?: string | null;
+  }[] = [];
+
+  assertAllowed(request: {
+    requestId?: string;
+    ownerUserId: number;
+    ipAddress?: string;
+    taskType: string;
+    gatewayModelCode?: string | null;
+    gatewayCapability?: string | null;
+  }): Promise<void> {
+    this.requests.push(request);
+
+    return Promise.reject(
+      new RiskControlServiceError("RISK_USER_RATE_LIMITED", "请求过于频繁，请稍后再试。", 429)
+    );
+  }
+}
 
 class InMemoryImageTasksRepository implements ImageTasksRepository {
   readonly records = new Map<string, ImageTaskRecord>();

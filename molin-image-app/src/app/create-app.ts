@@ -26,6 +26,7 @@ import type {
   ImageTaskStatus
 } from "../modules/image-tasks/image-task-service.js";
 import { ImageTaskServiceError } from "../modules/image-tasks/image-task-service.js";
+import { RiskControlServiceError } from "../modules/risk-control/risk-control-service.js";
 import type { ImageModelService } from "../modules/image-models/image-model-service.js";
 import { ImageModelServiceError } from "../modules/image-models/image-model-service.js";
 import {
@@ -666,6 +667,7 @@ async function handleRequest(
       request,
       response,
       requestId,
+      config,
       session.user_id,
       session.entitlement_id,
       dependencies.imageTaskService,
@@ -814,8 +816,10 @@ async function handleRequest(
     }
 
     await handleRetryImageTask(
+      request,
       response,
       requestId,
+      config,
       session.user_id,
       session.entitlement_id,
       imageTaskRetryMatch[1],
@@ -898,6 +902,7 @@ async function handleCreateImageTask(
   request: IncomingMessage,
   response: ServerResponse,
   requestId: string,
+  config: AppConfig,
   ownerUserId: number,
   entitlementId: number | undefined,
   imageTaskService: Pick<ImageTaskService, "createTask">,
@@ -938,6 +943,8 @@ async function handleCreateImageTask(
       expectedPoints: readOptionalStringField(body, "expected_points"),
       idempotencyKey:
         readHeader(request, "idempotency-key") ?? readOptionalStringField(body, "idempotency_key"),
+      requestId,
+      requestIp: getClientIp(request, config.trustProxy),
       entitlementId
     });
 
@@ -1118,8 +1125,10 @@ async function handleGetImageTask(
 }
 
 async function handleRetryImageTask(
+  request: IncomingMessage,
   response: ServerResponse,
   requestId: string,
+  config: AppConfig,
   ownerUserId: number,
   entitlementId: number | undefined,
   taskId: string,
@@ -1131,7 +1140,8 @@ async function handleRetryImageTask(
     const retryResult = await imageTaskService.retryTask(
       ownerUserId,
       decodeURIComponent(taskId),
-      entitlementId
+      entitlementId,
+      { requestId, requestIp: getClientIp(request, config.trustProxy) }
     );
 
     if (imageGenerationWorkerService !== undefined) {
@@ -1758,6 +1768,11 @@ function writePublicError(response: ServerResponse, requestId: string, error: un
     return;
   }
 
+  if (error instanceof RiskControlServiceError) {
+    writeError(response, error.statusCode, requestId, error.code, error.message);
+    return;
+  }
+
   if (error instanceof RequestBodyError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
     return;
@@ -1934,6 +1949,16 @@ function readHeader(request: IncomingMessage, name: string): string | undefined 
   }
 
   return value;
+}
+
+function getClientIp(request: IncomingMessage, trustProxy: boolean): string {
+  const forwardedFor = readHeader(request, "x-forwarded-for");
+  const firstForwardedIp = forwardedFor?.split(",")[0]?.trim();
+
+  // 只有确认入口代理会覆盖 X-Forwarded-For 时才信任该头，避免直连用户伪造 IP 绕过限流。
+  return trustProxy && firstForwardedIp && firstForwardedIp.length > 0
+    ? firstForwardedIp
+    : (request.socket.remoteAddress ?? "unknown");
 }
 
 function hasValidInternalToken(request: IncomingMessage, expectedToken: string): boolean {

@@ -35,6 +35,12 @@ const testConfig: AppConfig = {
   imageModelRequiredCapabilities: ["image_generation", "vision_text", "moderation"],
   billingRulesJson: "[]",
   billingMockBalancePoints: "100",
+  riskControlWindowSeconds: 60,
+  riskControlUserLimit: 20,
+  riskControlIpLimit: 60,
+  riskControlDisabledTaskTypes: [],
+  riskControlDisabledCapabilities: [],
+  trustProxy: true,
   internalApiToken: "test_internal_token",
   sessionCookieName: "molinimage_session",
   sessionCookieSecure: false,
@@ -57,6 +63,7 @@ void test("图片任务创建接口必须登录，并把 session 用户绑定为
       headers: {
         "content-type": "application/json",
         "idempotency-key": "task_create_api_001",
+        "x-forwarded-for": "203.0.113.9, 10.0.0.2",
         cookie
       },
       body: JSON.stringify({
@@ -71,6 +78,7 @@ void test("图片任务创建接口必须登录，并把 session 用户绑定为
     assert.equal(response.status, 201);
     assert.equal(imageTaskService.createRequests[0]?.ownerUserId, 479);
     assert.equal(imageTaskService.createRequests[0]?.idempotencyKey, "task_create_api_001");
+    assert.equal(imageTaskService.createRequests[0]?.requestIp, "203.0.113.9");
     assert.equal(body.task.owner_user_id, 479);
     assert.equal(body.task.status, "billing_reserved");
   } finally {
