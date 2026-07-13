@@ -109,13 +109,18 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风�
   assert.match(html, /data-mode="image_to_text"/);
   assert.match(html, /data-mode="upscale"/);
   assert.match(html, /id="upscaleFactorSelect"/);
+  assert.match(html, /id="sizeGuide"/);
   assert.match(html, /768x1024/);
   assert.match(html, /1536x1024/);
   assert.doesNotMatch(html, /1792x1024/);
   assert.doesNotMatch(html, /2048x1536/);
   assert.match(workbenchModes, /imageSizeOptions/);
+  assert.match(workbenchModes, /PPT 配图/);
+  assert.match(workbenchModes, /横版封面/);
   assert.doesNotMatch(workbenchModes, /1536x2048/);
   assert.match(workbench, /renderImageSizeOptions/);
+  assert.match(workbench, /renderImageSizeGuide/);
+  assert.match(workbench, /尺寸用途说明从统一配置渲染/);
   assert.match(workbench, /supported_image_sizes/);
   assert.match(workbench, /当前模型不支持/);
   assert.match(html, /id="taskDetailDrawer"/);
@@ -133,6 +138,7 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风�
   assert.match(workbench, /source_task_id: state\.sourceTaskId/);
   assert.match(taskDetailFormat, /resolveTaskFailureMessage/);
   assert.match(styles, /\.style-preset-card/);
+  assert.match(styles, /\.size-guide/);
   assert.match(styles, /@media \(max-width: 900px\)/);
 });
 

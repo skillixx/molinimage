@@ -42,15 +42,35 @@ export const modeConfig = {
 };
 
 export const imageSizeOptions = [
-  { value: "512x512", label: "512 x 512 · 小方图" },
-  { value: "768x768", label: "768 x 768 · 方图" },
-  { value: "1024x1024", label: "1024 x 1024 · 标准方图" },
-  { value: "512x768", label: "512 x 768 · 小竖图" },
-  { value: "768x1024", label: "768 x 1024 · 竖图" },
-  { value: "1024x1536", label: "1024 x 1536 · 海报竖图" },
-  { value: "768x512", label: "768 x 512 · 小横图" },
-  { value: "1024x768", label: "1024 x 768 · 横图" },
-  { value: "1536x1024", label: "1536 x 1024 · 封面横图" }
+  { value: "512x512", label: "512 x 512 · 头像/图标", ratio: "1:1", usage: "头像、图标、小封面" },
+  { value: "768x768", label: "768 x 768 · 社媒方图", ratio: "1:1", usage: "社媒配图、商品主图" },
+  {
+    value: "1024x1024",
+    label: "1024 x 1024 · 标准方图",
+    ratio: "1:1",
+    usage: "通用出图、作品封面"
+  },
+  { value: "512x768", label: "512 x 768 · 小竖图", ratio: "2:3", usage: "手机预览、竖版草图" },
+  { value: "768x1024", label: "768 x 1024 · 竖版内容", ratio: "3:4", usage: "小红书、竖版配图" },
+  {
+    value: "1024x1536",
+    label: "1024 x 1536 · 海报竖图",
+    ratio: "2:3",
+    usage: "海报、人物写真、竖版广告"
+  },
+  { value: "768x512", label: "768 x 512 · 小横图", ratio: "3:2", usage: "文章插图、横版草图" },
+  {
+    value: "1024x768",
+    label: "1024 x 768 · 横版内容",
+    ratio: "4:3",
+    usage: "PPT 配图、详情页插图"
+  },
+  {
+    value: "1536x1024",
+    label: "1536 x 1024 · 封面横图",
+    ratio: "3:2",
+    usage: "横版封面、Banner、场景图"
+  }
 ];
 
 export function hasStylePresetSupport(taskType) {

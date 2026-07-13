@@ -59,6 +59,7 @@ const elements = {
   qualitySelect: document.querySelector("#qualitySelect"),
   sizeField: document.querySelector("#sizeField"),
   sizeSelect: document.querySelector("#sizeSelect"),
+  sizeGuide: document.querySelector("#sizeGuide"),
   countField: document.querySelector("#countField"),
   countSelect: document.querySelector("#countSelect"),
   estimateStrip: document.querySelector("#estimateStrip"),
@@ -135,6 +136,7 @@ for (const tab of elements.modeTabs) {
     renderMode();
     renderModelOptions();
     renderImageSizeOptions();
+    renderImageSizeGuide();
     renderStylePresetOptions();
     renderStylePresetList();
     renderProgress("idle");
@@ -165,6 +167,7 @@ async function bootstrapWorkbench() {
     renderMode();
     renderModelOptions();
     renderImageSizeOptions();
+    renderImageSizeGuide();
     renderStylePresetOptions();
     renderStylePresetList();
     renderModelList(modelCatalog);
@@ -179,6 +182,7 @@ async function bootstrapWorkbench() {
     renderMode();
     renderModelOptions();
     renderImageSizeOptions();
+    renderImageSizeGuide();
     renderStylePresetOptions();
     renderStylePresetList();
     renderModelList({ items: [], message: "请从墨灵平台进入应用后重试。" });
@@ -211,6 +215,7 @@ function renderMode() {
   elements.stylePresetList.hidden = !hasStylePresetSupport(state.mode);
   elements.upscaleFactorField.hidden = state.mode !== "upscale";
   elements.sizeField.hidden = state.mode === "upscale";
+  elements.sizeGuide.hidden = state.mode === "image_to_text" || state.mode === "upscale";
   elements.qualityField.hidden = state.mode === "image_to_text" || state.mode === "upscale";
   elements.countField.hidden = state.mode === "upscale";
   elements.sizeSelect.disabled = state.mode === "image_to_text";
@@ -967,6 +972,46 @@ function renderImageSizeOptions() {
   // 当前模型可能只开放部分尺寸；切换模型后自动选择可用尺寸，避免提交时才被后端拦截。
   elements.sizeSelect.value =
     !hasSizeLimit || supportedSizes.includes(previousValue) ? previousValue : firstEnabled;
+}
+
+function renderImageSizeGuide() {
+  elements.sizeGuide.replaceChildren();
+
+  if (state.mode === "image_to_text" || state.mode === "upscale") {
+    return;
+  }
+
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const tbody = document.createElement("tbody");
+  const headerRow = document.createElement("tr");
+
+  for (const title of ["尺寸", "比例", "适合用途"]) {
+    const cell = document.createElement("th");
+
+    cell.scope = "col";
+    cell.textContent = title;
+    headerRow.append(cell);
+  }
+
+  thead.append(headerRow);
+
+  for (const size of imageSizeOptions) {
+    const row = document.createElement("tr");
+
+    // 尺寸用途说明从统一配置渲染，避免下拉选项和帮助表格出现两套含义。
+    for (const value of [size.value, size.ratio, size.usage]) {
+      const cell = document.createElement("td");
+
+      cell.textContent = value;
+      row.append(cell);
+    }
+
+    tbody.append(row);
+  }
+
+  table.append(thead, tbody);
+  elements.sizeGuide.append(table);
 }
 
 function currentSelectedModel() {

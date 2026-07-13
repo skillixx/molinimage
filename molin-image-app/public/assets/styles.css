@@ -293,6 +293,39 @@ textarea {
   margin-top: 14px;
 }
 
+.size-guide {
+  margin-top: 10px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.size-guide table {
+  width: 100%;
+  min-width: 520px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.size-guide th,
+.size-guide td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.size-guide th {
+  color: var(--muted);
+  font-weight: 700;
+  background: var(--surface-muted);
+}
+
+.size-guide tr:last-child td {
+  border-bottom: 0;
+}
+
 .estimate-strip {
   display: grid;
   grid-template-columns: auto 1fr auto;
