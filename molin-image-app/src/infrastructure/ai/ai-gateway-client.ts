@@ -99,21 +99,28 @@ export class HttpAiGatewayImageGenerationClient implements AiGatewayImageGenerat
       throw new Error("AI_GATEWAY_API_KEY 未配置，不能调用图片生成模型。");
     }
 
-    const response = await fetch(new URL("/images/generations", this.config.aiGatewayBaseUrl), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.config.aiGatewayApiKey}`
-      },
-      // 这里使用 OpenAI 兼容图片生成协议；不同上游由墨灵 AI 网关负责适配。
-      body: JSON.stringify({
-        model: input.model,
-        prompt: buildImagePrompt(input),
-        size: input.size,
-        n: input.count,
-        response_format: "b64_json"
-      })
-    });
+    if (isOpenRouterGateway(this.config.aiGatewayBaseUrl)) {
+      return this.generateImageWithOpenRouterChat(input);
+    }
+
+    const response = await fetch(
+      resolveGatewayUrl(this.config.aiGatewayBaseUrl, "images/generations"),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.config.aiGatewayApiKey}`
+        },
+        // 这里使用 OpenAI 兼容图片生成协议；不同上游由墨灵 AI 网关负责适配。
+        body: JSON.stringify({
+          model: input.model,
+          prompt: buildImagePrompt(input),
+          size: input.size,
+          n: input.count,
+          response_format: "b64_json"
+        })
+      }
+    );
 
     const payload = await response.json().catch(() => ({}));
 
@@ -122,6 +129,40 @@ export class HttpAiGatewayImageGenerationClient implements AiGatewayImageGenerat
     }
 
     return parseGenerateImageResult(payload, response.headers.get("x-request-id"));
+  }
+
+  private async generateImageWithOpenRouterChat(
+    input: GenerateImageInput
+  ): Promise<GenerateImageResult> {
+    const response = await fetch(
+      resolveGatewayUrl(this.config.aiGatewayBaseUrl, "chat/completions"),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.config.aiGatewayApiKey}`
+        },
+        // OpenRouter 的 Gemini 图片模型是 text+image -> text+image，多模态生成需要走 chat/completions。
+        body: JSON.stringify({
+          model: input.model,
+          modalities: ["image", "text"],
+          messages: [
+            {
+              role: "user",
+              content: buildOpenRouterImagePrompt(input)
+            }
+          ]
+        })
+      }
+    );
+
+    const payload = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(readGatewayErrorMessage(payload));
+    }
+
+    return parseOpenRouterChatImageResult(payload, response.headers.get("x-request-id"));
   }
 }
 
@@ -150,7 +191,7 @@ export class HttpAiGatewayImageEditClient implements AiGatewayImageEditClient {
     // 图生图输入图只在服务端读取和转发，浏览器端不会拿到 MinIO 写权限或 AI 网关密钥。
     form.append("image", imageBlob, `input.${resolveImageExtension(input.imageMimeType)}`);
 
-    const response = await fetch(new URL("/images/edits", this.config.aiGatewayBaseUrl), {
+    const response = await fetch(resolveGatewayUrl(this.config.aiGatewayBaseUrl, "images/edits"), {
       method: "POST",
       headers: {
         authorization: `Bearer ${this.config.aiGatewayApiKey}`
@@ -181,34 +222,37 @@ export class HttpAiGatewayVisionTextClient implements AiGatewayVisionTextClient 
       throw new Error("AI_GATEWAY_API_KEY 未配置，不能调用图生文模型。");
     }
 
-    const response = await fetch(new URL("/chat/completions", this.config.aiGatewayBaseUrl), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${this.config.aiGatewayApiKey}`
-      },
-      // 图生文统一走 OpenAI 兼容 vision messages；具体模型适配交给墨灵 AI 网关处理。
-      body: JSON.stringify({
-        model: input.model,
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: input.prompt
-              },
-              {
-                type: "image_url",
-                image_url: {
-                  url: `data:${input.imageMimeType};base64,${input.imageBase64}`
+    const response = await fetch(
+      resolveGatewayUrl(this.config.aiGatewayBaseUrl, "chat/completions"),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.config.aiGatewayApiKey}`
+        },
+        // 图生文统一走 OpenAI 兼容 vision messages；具体模型适配交给墨灵 AI 网关处理。
+        body: JSON.stringify({
+          model: input.model,
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: input.prompt
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:${input.imageMimeType};base64,${input.imageBase64}`
+                  }
                 }
-              }
-            ]
-          }
-        ]
-      })
-    });
+              ]
+            }
+          ]
+        })
+      }
+    );
 
     const payload = await response.json().catch(() => ({}));
 
@@ -232,6 +276,15 @@ function buildImagePrompt(input: GenerateImageInput): string {
   }
 
   return `${input.prompt}\n\n反向提示词：${negativePrompt}`;
+}
+
+function buildOpenRouterImagePrompt(input: GenerateImageInput): string {
+  const prompt = buildImagePrompt(input);
+  const countText =
+    input.count > 1 ? `请生成 ${String(input.count)} 张彼此有差异的图片。` : "请生成 1 张图片。";
+
+  // OpenRouter chat 图片模型没有统一的 size/n 字段，这里把尺寸和数量写入用户消息，让模型按目标规格输出。
+  return `${prompt}\n\n输出要求：${countText}目标尺寸 ${input.size}。请直接返回图片结果。`;
 }
 
 function parseGenerateImageResult(
@@ -270,6 +323,119 @@ function parseGenerateImageResult(
       readOptionalString(payload, "request_id") ?? fallbackRequestId ?? `ai_${String(Date.now())}`,
     images,
     usage: isRecord(payload.usage) ? payload.usage : null
+  };
+}
+
+function parseOpenRouterChatImageResult(
+  payload: unknown,
+  fallbackRequestId: string | null
+): GenerateImageResult {
+  if (!isRecord(payload)) {
+    throw new Error("AI 网关图片生成响应格式异常。");
+  }
+
+  const images = extractChatGeneratedImages(payload);
+
+  if (images.length === 0) {
+    throw new Error("AI 网关图片生成响应缺少图片数据。");
+  }
+
+  return {
+    request_id:
+      readOptionalString(payload, "request_id") ??
+      readOptionalString(payload, "id") ??
+      fallbackRequestId ??
+      `ai_${String(Date.now())}`,
+    images,
+    usage: isRecord(payload.usage) ? payload.usage : null
+  };
+}
+
+function extractChatGeneratedImages(payload: Record<string, unknown>): GeneratedImage[] {
+  const choices = payload.choices;
+
+  if (!Array.isArray(choices)) {
+    return [];
+  }
+
+  return choices.flatMap((choice) => {
+    if (!isRecord(choice) || !isRecord(choice.message)) {
+      return [];
+    }
+
+    // OpenRouter 图片模型常把生成图放在 message.images[].image_url.url，兼容 content 数组和文本里的 data URI。
+    return [
+      ...extractImagesFromMessageImages(choice.message),
+      ...extractImagesFromMessageContent(choice.message.content)
+    ];
+  });
+}
+
+function extractImagesFromMessageImages(message: Record<string, unknown>): GeneratedImage[] {
+  const images = message.images;
+
+  if (!Array.isArray(images)) {
+    return [];
+  }
+
+  return images
+    .map((item) => extractImageUrlFromRecord(item))
+    .filter((url): url is string => url !== undefined)
+    .map(parseGeneratedImageUrl);
+}
+
+function extractImagesFromMessageContent(content: unknown): GeneratedImage[] {
+  if (typeof content === "string") {
+    return extractDataImageUrls(content).map(parseGeneratedImageUrl);
+  }
+
+  if (!Array.isArray(content)) {
+    return [];
+  }
+
+  return content
+    .map((item) => extractImageUrlFromRecord(item))
+    .filter((url): url is string => url !== undefined)
+    .map(parseGeneratedImageUrl);
+}
+
+function extractImageUrlFromRecord(value: unknown): string | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  if (typeof value.url === "string") {
+    return value.url;
+  }
+
+  if (typeof value.image_url === "string") {
+    return value.image_url;
+  }
+
+  if (isRecord(value.image_url) && typeof value.image_url.url === "string") {
+    return value.image_url.url;
+  }
+
+  return undefined;
+}
+
+function extractDataImageUrls(content: string): string[] {
+  return Array.from(
+    content.matchAll(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=_-]+/giu),
+    (match) => match[0]
+  );
+}
+
+function parseGeneratedImageUrl(url: string): GeneratedImage {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,(.+)$/iu.exec(url.trim());
+
+  if (match === null || match[2].trim().length === 0) {
+    throw new Error("AI 网关未返回 base64 图片。");
+  }
+
+  return {
+    mime_type: match[1].toLowerCase(),
+    content_base64: match[2]
   };
 }
 
@@ -328,6 +494,21 @@ function readOptionalString(source: Record<string, unknown>, key: string): strin
   const value = source[key];
 
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function isOpenRouterGateway(baseUrl: string): boolean {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase().endsWith("openrouter.ai");
+  } catch {
+    return false;
+  }
+}
+
+function resolveGatewayUrl(baseUrl: string, path: string): URL {
+  const normalizedBase = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+
+  // AI 网关 base URL 通常已经包含 /api/v1；不能用以 / 开头的 URL 覆盖掉这个前缀。
+  return new URL(path, normalizedBase);
 }
 
 function resolveImageExtension(mimeType: string): string {
