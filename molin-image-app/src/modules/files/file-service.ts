@@ -43,6 +43,11 @@ export interface FileContentResult {
   content_base64: string;
 }
 
+export interface FileBinaryResult {
+  file: PublicFileRecord;
+  body: Buffer;
+}
+
 export interface PublicFileRecord {
   id: string;
   owner_user_id: number;
@@ -215,21 +220,30 @@ export class FileService {
       Date.now() + this.config.storagePresignedUrlTtlSeconds * 1000
     ).toISOString();
 
-    return await Promise.all(
-      files.map(async (file) => {
-        const url = await this.storageService.createPresignedGetUrl({
-          key: file.storage_key,
-          expiresInSeconds: this.config.storagePresignedUrlTtlSeconds
-        });
+    return files.map((file) => {
+      const fileId = encodeURIComponent(file.id);
+      // 预览图走应用后端代理，不把 MinIO 内网地址或预签名 URL 暴露给浏览器。
+      const previewUrl = `/api/files/${fileId}/preview`;
+      const downloadUrl = `/api/files/${fileId}/preview?download=1`;
 
-        return {
-          file: toPublicFileRecord(file),
-          preview_url: url,
-          download_url: url,
-          expires_at: expiresAt
-        };
-      })
-    );
+      return {
+        file: toPublicFileRecord(file),
+        preview_url: previewUrl,
+        download_url: downloadUrl,
+        expires_at: expiresAt
+      };
+    });
+  }
+
+  async readPreviewFile(ownerUserId: number, fileId: string): Promise<FileBinaryResult> {
+    const [file] = await this.loadOwnedFiles(ownerUserId, [fileId]);
+    // 浏览器预览通过后端代理读取对象，既保留 owner 校验，也避免客户端直连 MinIO 内网地址。
+    const body = await this.storageService.readObject(file.storage_key);
+
+    return {
+      file: toPublicFileRecord(file),
+      body
+    };
   }
 
   private async loadOwnedFiles(ownerUserId: number, fileIds: string[]): Promise<FileRecord[]> {

@@ -49,7 +49,11 @@ export interface AppDependencies {
   sessionStore?: InMemorySessionStore;
   fileService?: Pick<
     FileService,
-    "uploadFile" | "createDownloadUrl" | "createPreviewUrls" | "assertFilesOwned"
+    | "uploadFile"
+    | "createDownloadUrl"
+    | "createPreviewUrls"
+    | "readPreviewFile"
+    | "assertFilesOwned"
   >;
   imageModelService?: Pick<ImageModelService, "listVisibleImageModels"> &
     Partial<
@@ -927,6 +931,29 @@ async function handleRequest(
   }
 
   const downloadUrlMatch = /^\/api\/files\/([^/]+)\/download-url$/u.exec(url.pathname);
+  const filePreviewMatch = /^\/api\/files\/([^/]+)\/preview$/u.exec(url.pathname);
+
+  if (request.method === "GET" && filePreviewMatch !== null) {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (dependencies.fileService === undefined) {
+      writeError(response, 503, requestId, "FILE_SERVICE_UNAVAILABLE", "文件服务暂不可用。");
+      return;
+    }
+
+    await handleFilePreview(
+      url,
+      response,
+      requestId,
+      session.user_id,
+      filePreviewMatch[1],
+      dependencies.fileService
+    );
+    return;
+  }
 
   if (request.method === "GET" && downloadUrlMatch !== null) {
     if (session === undefined) {
@@ -1727,6 +1754,36 @@ async function handleDownloadUrl(
   }
 }
 
+async function handleFilePreview(
+  url: URL,
+  response: ServerResponse,
+  requestId: string,
+  ownerUserId: number,
+  fileId: string,
+  fileService: Pick<FileService, "readPreviewFile">
+): Promise<void> {
+  try {
+    const result = await fileService.readPreviewFile(ownerUserId, decodeURIComponent(fileId));
+
+    response.statusCode = 200;
+    response.setHeader("X-Request-Id", requestId);
+    response.setHeader("content-type", result.file.mime_type);
+    response.setHeader("content-length", String(result.body.byteLength));
+    response.setHeader("cache-control", "private, max-age=300");
+
+    if (url.searchParams.get("download") === "1") {
+      response.setHeader(
+        "content-disposition",
+        `attachment; filename="${encodeHeaderFileName(result.file.original_name ?? result.file.id)}"`
+      );
+    }
+
+    response.end(result.body);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
 async function handleLaunch(
   url: URL,
   response: ServerResponse,
@@ -1791,6 +1848,11 @@ function writeJson(response: ServerResponse, statusCode: number, body: unknown):
     "cache-control": "no-store"
   });
   response.end(payload);
+}
+
+function encodeHeaderFileName(fileName: string): string {
+  // Content-Disposition 只放 ASCII 安全文件名，避免换行或引号破坏响应头。
+  return fileName.replace(/[^a-zA-Z0-9._-]/gu, "_").slice(0, 120);
 }
 
 async function servePublicFile(

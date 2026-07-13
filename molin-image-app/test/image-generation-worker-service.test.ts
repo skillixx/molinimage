@@ -97,9 +97,9 @@ void test("文生图 worker 调用 AI 网关、保存结果文件、写日志并
   assert.equal(storage.uploads[0]?.body.toString("utf8"), "fake png bytes");
   assert.equal(
     previewUrls[0]?.preview_url,
-    `https://storage.example.com/${fileRepository.records[0]?.storage_key}`
+    `/api/files/${fileRepository.records[0]?.id ?? ""}/preview`
   );
-  assert.equal(previewUrls[0]?.download_url, previewUrls[0]?.preview_url);
+  assert.equal(previewUrls[0]?.download_url, `${previewUrls[0]?.preview_url}?download=1`);
   assert.equal(aiGateway.inputs[0]?.model, "image-gen-default");
   assert.match(aiGateway.inputs[0]?.prompt ?? "", /商业摄影模板/);
   assert.match(aiGateway.inputs[0]?.prompt ?? "", /一张蓝色科技海报/);

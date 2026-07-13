@@ -621,6 +621,10 @@ class FakeFileService {
     return Promise.reject(new Error("测试不需要下载文件"));
   }
 
+  readPreviewFile() {
+    return Promise.reject(new Error("测试不需要预览文件"));
+  }
+
   createPreviewUrls(_ownerUserId: number, fileIds: string[]) {
     return Promise.resolve(
       fileIds.map((fileId) => {

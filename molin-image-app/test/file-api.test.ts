@@ -11,6 +11,7 @@ import type {
 } from "../src/infrastructure/moling/moling-client.js";
 import type {
   DownloadUrlResult,
+  FileBinaryResult,
   UploadFileRequest,
   UploadFileResult
 } from "../src/modules/files/file-service.js";
@@ -103,9 +104,34 @@ void test("下载预签名接口使用当前 session 用户做权限边界", asy
   }
 });
 
+void test("文件预览接口通过应用后端代理返回图片内容", async () => {
+  const fileService = new FakeFileService();
+  const app = await startTestApp(fileService);
+
+  try {
+    const unauthorizedResponse = await fetch(`${app.baseUrl}/api/files/file_api/preview`);
+    const cookie = await createSessionCookie(app.baseUrl);
+    const response = await fetch(`${app.baseUrl}/api/files/file_api/preview`, {
+      headers: {
+        cookie
+      }
+    });
+    const body = Buffer.from(await response.arrayBuffer());
+
+    assert.equal(unauthorizedResponse.status, 401);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "image/png");
+    assert.equal(body.toString("utf8"), "image-bytes");
+    assert.deepEqual(fileService.previewRequests[0], { ownerUserId: 479, fileId: "file_api" });
+  } finally {
+    await app.close();
+  }
+});
+
 class FakeFileService {
   readonly uploadRequests: UploadFileRequest[] = [];
   readonly downloadRequests: { ownerUserId: number; fileId: string }[] = [];
+  readonly previewRequests: { ownerUserId: number; fileId: string }[] = [];
 
   uploadFile(request: UploadFileRequest): Promise<UploadFileResult> {
     this.uploadRequests.push(request);
@@ -155,6 +181,29 @@ class FakeFileService {
 
   createPreviewUrls(): Promise<[]> {
     return Promise.resolve([]);
+  }
+
+  readPreviewFile(ownerUserId: number, fileId: string): Promise<FileBinaryResult> {
+    this.previewRequests.push({ ownerUserId, fileId });
+
+    return Promise.resolve({
+      file: {
+        id: fileId,
+        owner_user_id: ownerUserId,
+        file_type: "output",
+        original_name: "preview.png",
+        mime_type: "image/png",
+        storage_provider: "minio",
+        storage_bucket: "molinimage",
+        storage_key: `generated/${String(ownerUserId)}/${fileId}.png`,
+        size_bytes: 11,
+        width: 1,
+        height: 1,
+        checksum: "checksum",
+        created_at: "2026-07-09T00:00:00.000Z"
+      },
+      body: Buffer.from("image-bytes")
+    });
   }
 
   assertFilesOwned(): Promise<void> {

@@ -125,6 +125,32 @@ void test("worker 读取图片内容时仍然校验文件归属", async () => {
   );
 });
 
+void test("预览地址走应用后端代理且读取内容仍校验归属", async () => {
+  const repository = new InMemoryFilesRepository();
+  const storage = new FakeStorageService();
+  const service = new FileService(repository, storage, {
+    storageProvider: "minio",
+    storageBucket: "molinimage",
+    storagePresignedUrlTtlSeconds: 300
+  });
+  const ownFile = await repository.create(
+    createRecord("file_preview", 479, "generated/479/file_preview.png")
+  );
+  await repository.create(createRecord("file_other", 480, "generated/480/file_other.png"));
+
+  const [preview] = await service.createPreviewUrls(479, [ownFile.id]);
+  const binary = await service.readPreviewFile(479, ownFile.id);
+
+  assert.equal(preview.preview_url, "/api/files/file_preview/preview");
+  assert.equal(preview.download_url, "/api/files/file_preview/preview?download=1");
+  assert.equal(storage.presignedInputs.length, 0);
+  assert.equal(binary.body.toString("utf8"), "stored image bytes");
+  await assert.rejects(
+    () => service.readPreviewFile(479, "file_other"),
+    (error: unknown) => error instanceof FileServiceError && error.code === "FILE_FORBIDDEN"
+  );
+});
+
 class InMemoryFilesRepository implements FilesRepository {
   private readonly records = new Map<string, FileRecord>();
 
