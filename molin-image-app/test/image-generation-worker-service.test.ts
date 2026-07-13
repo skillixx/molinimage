@@ -382,6 +382,74 @@ void test("高清放大 worker 按 4x 目标尺寸调用 image_edit 并记录结
   assert.equal(aiLogs.records.at(-1)?.operation, "upscale");
 });
 
+void test("高清放大使用通用 image_edit 模型时保存实际返回尺寸", async () => {
+  const taskRepository = new InMemoryImageTasksRepository();
+  const fileRepository = new InMemoryFilesRepository();
+  const storage = new FakeStorageService();
+  const aiGateway = new FakeAiGatewayImageGenerationClient();
+  const imageEdit = new FixedSizeImageEditClient(1024, 1024);
+  const aiLogs = new InMemoryAiGatewayCallLogsRepository();
+  const fileService = new FileService(fileRepository, storage, {
+    storageProvider: "minio",
+    storageBucket: "molinimage",
+    storagePresignedUrlTtlSeconds: 600
+  });
+  const taskService = new ImageTaskService(taskRepository);
+  const worker = new ImageGenerationWorkerService(
+    taskRepository,
+    taskService,
+    fileService,
+    aiGateway,
+    aiLogs,
+    undefined,
+    imageEdit
+  );
+  const inputFile = await fileRepository.create({
+    id: "file_input_upscale_generic_001",
+    owner_user_id: 479,
+    file_type: "input",
+    original_name: "large.jpg",
+    mime_type: "image/jpeg",
+    storage_provider: "minio",
+    storage_bucket: "molinimage",
+    storage_key: "uploads/479/large.jpg",
+    size_bytes: 120,
+    width: 1229,
+    height: 1895,
+    checksum: "checksum"
+  });
+  const task = await taskRepository.create({
+    id: "task_upscale_generic_001",
+    owner_user_id: 479,
+    task_type: "upscale",
+    status: "billing_reserved",
+    prompt: null,
+    negative_prompt: null,
+    style_preset_id: null,
+    input_file_ids: [inputFile.id],
+    gateway_model_code: "google/gemini-3.1-flash-lite-image",
+    gateway_capability: "image_edit",
+    quality: null,
+    image_size: null,
+    image_count: 1,
+    upscale_factor: 2,
+    cost_points: "4",
+    billing_event_id: "billing_upscale_generic_001",
+    idempotency_key: "task_create_upscale_generic_001"
+  });
+
+  const result = await worker.processTask(task.id);
+  const outputFile = fileRepository.records.find((file) =>
+    result.task.output_file_ids.includes(file.id)
+  );
+
+  assert.equal(result.task.status, "succeeded");
+  assert.equal(imageEdit.inputs[0]?.size, "2458x3790");
+  assert.ok(outputFile);
+  assert.equal(outputFile.width, 1024);
+  assert.equal(outputFile.height, 1024);
+});
+
 void test("图片修复网关失败时任务失败并释放预占积分", async () => {
   const taskRepository = new InMemoryImageTasksRepository();
   const fileRepository = new InMemoryFilesRepository();
@@ -716,6 +784,30 @@ class FakeUpscaleImageEditClient implements AiGatewayImageEditClient {
         {
           mime_type: "image/png",
           content_base64: createPngHeader(width, height).toString("base64")
+        }
+      ],
+      usage: { image_count: 1 }
+    });
+  }
+}
+
+class FixedSizeImageEditClient implements AiGatewayImageEditClient {
+  readonly inputs: EditImageInput[] = [];
+
+  constructor(
+    private readonly width: number,
+    private readonly height: number
+  ) {}
+
+  editImage(input: EditImageInput): Promise<EditImageResult> {
+    this.inputs.push(input);
+
+    return Promise.resolve({
+      request_id: "fixed_size_edit_request_001",
+      images: [
+        {
+          mime_type: "image/png",
+          content_base64: createPngHeader(this.width, this.height).toString("base64")
         }
       ],
       usage: { image_count: 1 }

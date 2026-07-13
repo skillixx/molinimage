@@ -212,13 +212,15 @@ export class ImageGenerationWorkerService {
 
         const targetWidth = resolveUpscaleTargetDimension(inputWidth, factor);
         const targetHeight = resolveUpscaleTargetDimension(inputHeight, factor);
+        const strictDimensions = task.gateway_capability === "upscale";
 
         return {
           prompt: buildUpscalePrompt(factor, targetWidth, targetHeight),
           size: `${String(targetWidth)}x${String(targetHeight)}`,
           count: 1,
-          expectedWidth: targetWidth,
-          expectedHeight: targetHeight
+          // 专用 upscale 模型必须按目标尺寸验收；OpenRouter/Gemini 这类 image_edit 通用模型会返回平台允许尺寸，先保存实际尺寸。
+          expectedWidth: strictDimensions ? targetWidth : undefined,
+          expectedHeight: strictDimensions ? targetHeight : undefined
         };
       },
       unavailableMessage: "高清放大模型服务暂不可用。",
