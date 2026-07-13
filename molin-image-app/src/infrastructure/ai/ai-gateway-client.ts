@@ -179,6 +179,10 @@ export class HttpAiGatewayImageEditClient implements AiGatewayImageEditClient {
       throw new Error("AI_GATEWAY_API_KEY 未配置，不能调用图生图模型。");
     }
 
+    if (isOpenRouterGateway(this.config.aiGatewayBaseUrl)) {
+      return this.editImageWithOpenRouterChat(input);
+    }
+
     const form = new FormData();
     const imageBuffer = Buffer.from(input.imageBase64, "base64");
     const imageBlob = new Blob([imageBuffer], { type: input.imageMimeType });
@@ -206,6 +210,49 @@ export class HttpAiGatewayImageEditClient implements AiGatewayImageEditClient {
     }
 
     return parseGenerateImageResult(payload, response.headers.get("x-request-id"));
+  }
+
+  private async editImageWithOpenRouterChat(input: EditImageInput): Promise<EditImageResult> {
+    const response = await fetch(
+      resolveGatewayUrl(this.config.aiGatewayBaseUrl, "chat/completions"),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.config.aiGatewayApiKey}`
+        },
+        // OpenRouter 图片编辑同样走多模态 chat：文本指令 + 输入图 data URI，由模型返回新的图片。
+        body: JSON.stringify({
+          model: input.model,
+          modalities: ["image", "text"],
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: buildOpenRouterEditPrompt(input)
+                },
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:${input.imageMimeType};base64,${input.imageBase64}`
+                  }
+                }
+              ]
+            }
+          ]
+        })
+      }
+    );
+
+    const payload = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(readGatewayErrorMessage(payload));
+    }
+
+    return parseOpenRouterChatImageResult(payload, response.headers.get("x-request-id"));
   }
 }
 
@@ -285,6 +332,16 @@ function buildOpenRouterImagePrompt(input: GenerateImageInput): string {
 
   // OpenRouter chat 图片模型没有统一的 size/n 字段，这里把尺寸和数量写入用户消息，让模型按目标规格输出。
   return `${prompt}\n\n输出要求：${countText}目标尺寸 ${input.size}。请直接返回图片结果。`;
+}
+
+function buildOpenRouterEditPrompt(input: EditImageInput): string {
+  const countText =
+    input.count > 1
+      ? `请生成 ${String(input.count)} 张编辑后的图片。`
+      : "请生成 1 张编辑后的图片。";
+
+  // 图生图/修复/放大共用 image_edit 能力，提示词里保留用户意图、目标尺寸和输出数量。
+  return `${input.prompt}\n\n输出要求：${countText}目标尺寸 ${input.size}。请基于上传图片完成编辑，并直接返回图片结果。`;
 }
 
 function parseGenerateImageResult(

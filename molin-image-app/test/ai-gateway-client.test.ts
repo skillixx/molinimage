@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { HttpAiGatewayImageGenerationClient } from "../src/infrastructure/ai/ai-gateway-client.js";
+import {
+  HttpAiGatewayImageEditClient,
+  HttpAiGatewayImageGenerationClient
+} from "../src/infrastructure/ai/ai-gateway-client.js";
 
 void test("OpenRouter 图片模型使用 chat completions 并解析 message images", async () => {
   const originalFetch = globalThis.fetch;
@@ -111,6 +114,73 @@ void test("普通 OpenAI 图片网关继续使用 images generations", async () 
       {
         mime_type: "image/webp",
         content_base64: "aW1hZ2UtMg=="
+      }
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+void test("OpenRouter 图生图使用 chat completions 并携带输入图", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: { url: string; body: Record<string, unknown> }[] = [];
+
+  globalThis.fetch = (url, init) => {
+    const body = JSON.parse(readMockRequestBody(init)) as Record<string, unknown>;
+    requests.push({ url: readMockRequestUrl(url), body });
+
+    return Promise.resolve(
+      new Response(
+        JSON.stringify({
+          id: "or_edit_request_001",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: [
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: "data:image/png;base64,ZWRpdGVkLWltYWdl"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        }
+      )
+    );
+  };
+
+  try {
+    const client = new HttpAiGatewayImageEditClient({
+      aiGatewayBaseUrl: "https://openrouter.ai/api/v1",
+      aiGatewayApiKey: "test-key"
+    });
+    const result = await client.editImage({
+      model: "google/gemini-3.1-flash-lite-image",
+      imageBase64: "aW5wdXQtaW1hZ2U=",
+      imageMimeType: "image/png",
+      prompt: "保持主体，换成雪山背景",
+      size: "1024x1024",
+      count: 1
+    });
+    const messages = JSON.stringify(requests[0]?.body.messages);
+
+    assert.equal(requests[0]?.url, "https://openrouter.ai/api/v1/chat/completions");
+    assert.equal(requests[0]?.body.model, "google/gemini-3.1-flash-lite-image");
+    assert.deepEqual(requests[0]?.body.modalities, ["image", "text"]);
+    assert.match(messages, /保持主体，换成雪山背景/);
+    assert.match(messages, /data:image\/png;base64,aW5wdXQtaW1hZ2U=/);
+    assert.deepEqual(result.images, [
+      {
+        mime_type: "image/png",
+        content_base64: "ZWRpdGVkLWltYWdl"
       }
     ]);
   } finally {
