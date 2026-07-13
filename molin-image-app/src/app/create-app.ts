@@ -1287,7 +1287,7 @@ async function handleImageHistory(
     });
     const items = await Promise.all(
       history.items.map(async (task) => {
-        const enriched = await attachOutputPreviews({ task }, ownerUserId, fileService);
+        const enriched = await attachOutputPreviewsForHistory({ task }, ownerUserId, fileService);
 
         return {
           ...task,
@@ -1306,6 +1306,23 @@ async function handleImageHistory(
     });
   } catch (error: unknown) {
     writePublicError(response, requestId, error);
+  }
+}
+
+async function attachOutputPreviewsForHistory(
+  result: Awaited<ReturnType<Pick<ImageTaskService, "getTask">["getTask"]>>,
+  ownerUserId: number,
+  fileService: Pick<FileService, "createPreviewUrls"> | undefined
+) {
+  try {
+    return await attachOutputPreviews(result, ownerUserId, fileService);
+  } catch {
+    // 历史列表不能因为某个旧文件的预览 URL 生成失败就整体变空；任务记录先返回，详情页再暴露具体文件问题。
+    return {
+      ...result,
+      input_files: [],
+      result_files: []
+    };
   }
 }
 

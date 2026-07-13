@@ -82,6 +82,8 @@ void test("前端 API 封装只访问应用后端接口", async () => {
   assert.match(frontendSource, /\/api\/image\/tasks/);
   assert.match(frontendSource, /\/api\/files/);
   assert.match(frontendSource, /\/api\/image\/history/);
+  assert.match(frontendSource, /renderHistoryLoadError/);
+  assert.doesNotMatch(frontendSource, /catch\s*\{\s*renderHistory\(\[\]\)/);
   assert.match(frontendSource, /retryImageTask/);
   assert.match(frontendSource, /uploadImageFile/);
   assert.match(frontendSource, /window\.confirm/);

@@ -1104,9 +1104,18 @@ async function refreshHistory() {
   try {
     const history = await getImageHistory(state.mode);
     renderHistory(history.items ?? []);
-  } catch {
-    renderHistory([]);
+  } catch (error) {
+    renderHistoryLoadError(error);
   }
+}
+
+function renderHistoryLoadError(error) {
+  elements.historyList.replaceChildren();
+  const empty = document.createElement("p");
+  empty.className = "empty-text";
+  empty.textContent =
+    error instanceof Error ? `历史加载失败：${error.message}` : "历史加载失败，请稍后重试。";
+  elements.historyList.append(empty);
 }
 
 function renderHistory(items) {
