@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>墨灵 AI 图片创作</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark">MI</div>
+          <div>
+            <h1>墨灵 AI 图片创作</h1>
+            <p id="sessionSummary">正在连接工作台</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <span id="modelHealth" class="status-pill">模型加载中</span>
+          <button id="refreshButton" class="ghost-button" type="button">刷新</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="tool-panel" aria-label="创作工作台">
+          <div id="errorBanner" class="error-banner" hidden></div>
+
+          <nav class="mode-tabs" aria-label="功能模式">
+            <button class="mode-tab is-active" type="button" data-mode="text_to_image">
+              文生图
+            </button>
+            <button class="mode-tab" type="button" data-mode="image_to_text">图生文</button>
+            <button class="mode-tab" type="button" data-mode="image_to_image">图生图</button>
+            <button class="mode-tab" type="button" data-mode="image_restore">图片修复</button>
+            <button class="mode-tab" type="button" data-mode="upscale">高清放大</button>
+          </nav>
+
+          <div class="work-surface">
+            <section class="prompt-panel" aria-label="参数面板">
+              <div class="panel-heading">
+                <p class="eyebrow" id="modeEyebrow">TEXT TO IMAGE</p>
+                <h2 id="modeTitle">文生图</h2>
+              </div>
+
+              <label class="field" id="promptField">
+                <span>提示词</span>
+                <textarea
+                  id="promptInput"
+                  rows="8"
+                  placeholder="输入画面主题、风格、主体、背景和细节"
+                ></textarea>
+              </label>
+
+              <label class="field upload-field" id="imageUploadField" hidden>
+                <span>上传图片</span>
+                <input
+                  id="imageInput"
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp,image/gif"
+                />
+                <small id="uploadHint">支持 png、jpeg、webp、gif，最大 10MB。</small>
+                <span class="reference-preview" id="referencePreview" hidden>
+                  <img id="referencePreviewImage" alt="自动带入的历史结果图" />
+                  <span>已自动带入历史结果图</span>
+                </span>
+              </label>
+
+              <label class="field" id="editModeField" hidden>
+                <span>编辑模式</span>
+                <select id="editModeSelect">
+                  <option value="keep_subject">保持主体</option>
+                  <option value="change_background">换背景</option>
+                  <option value="change_style">换风格</option>
+                  <option value="variation">生成变体</option>
+                </select>
+              </label>
+
+              <label class="field" id="restoreTypeField" hidden>
+                <span>修复类型</span>
+                <select id="restoreTypeSelect">
+                  <option value="old_photo">老照片修复</option>
+                  <option value="denoise">去噪增强</option>
+                  <option value="deblur">模糊变清晰</option>
+                  <option value="color_enhance">色彩增强</option>
+                </select>
+              </label>
+
+              <label class="field" id="stylePresetField" hidden>
+                <span>风格模板</span>
+                <select id="stylePresetSelect"></select>
+              </label>
+
+              <div id="stylePresetList" class="style-preset-list" hidden></div>
+
+              <label class="field" id="upscaleFactorField" hidden>
+                <span>高清倍率</span>
+                <select id="upscaleFactorSelect">
+                  <option value="2">2x</option>
+                  <option value="4">4x</option>
+                </select>
+              </label>
+
+              <div class="field-grid">
+                <label class="field">
+                  <span>模型</span>
+                  <select id="modelSelect"></select>
+                </label>
+                <label class="field" id="qualityField">
+                  <span>质量</span>
+                  <select id="qualitySelect">
+                    <option value="standard">标准</option>
+                    <option value="hd">高清</option>
+                  </select>
+                </label>
+                <label class="field" id="sizeField">
+                  <span>尺寸</span>
+                  <select id="sizeSelect">
+                    <option value="1024x1024">1024x1024</option>
+                    <option value="1024x1536">1024x1536</option>
+                    <option value="1536x1024">1536x1024</option>
+                  </select>
+                </label>
+                <label class="field" id="countField">
+                  <span>数量</span>
+                  <select id="countSelect">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                  </select>
+                </label>
+              </div>
+
+              <div class="estimate-strip" id="estimateStrip">
+                <span>预计积分</span>
+                <strong id="estimatePoints">--</strong>
+                <small id="estimateBalance">余额校验中</small>
+              </div>
+
+              <div class="action-row">
+                <button id="primaryAction" class="primary-button" type="button">创建任务</button>
+                <span id="actionHint">提交后将预占积分并生成图片</span>
+              </div>
+
+              <div id="taskProgress" class="task-progress" aria-live="polite"></div>
+            </section>
+
+            <aside class="model-panel" aria-label="模型目录">
+              <div class="panel-heading compact">
+                <p class="eyebrow">MODEL CATALOG</p>
+                <h2>可用模型</h2>
+              </div>
+              <div id="modelList" class="model-list"></div>
+              <div class="result-list" id="resultList"></div>
+              <div class="history-panel">
+                <div class="panel-heading compact">
+                  <p class="eyebrow">HISTORY</p>
+                  <h2>作品历史</h2>
+                </div>
+                <div id="historyList" class="history-list"></div>
+              </div>
+            </aside>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="taskDetailBackdrop" class="task-detail-backdrop" hidden></div>
+    <aside
+      id="taskDetailDrawer"
+      class="task-detail-drawer"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="taskDetailTitle"
+      hidden
+    >
+      <header class="task-detail-header">
+        <div>
+          <p class="eyebrow">TASK DETAIL</p>
+          <h2 id="taskDetailTitle">任务详情</h2>
+        </div>
+        <button id="taskDetailClose" class="ghost-button" type="button" aria-label="关闭任务详情">
+          关闭
+        </button>
+      </header>
+      <div id="taskDetailContent" class="task-detail-content" aria-live="polite"></div>
+    </aside>
+
+    <script type="module" src="/assets/workbench.js"></script>
+  </body>
+</html>

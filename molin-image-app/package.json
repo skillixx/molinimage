@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "tsx watch src/app/server.ts",
     "dev:worker": "tsx watch src/workers/image-task-worker.ts",
+    "db:migrate": "tsx scripts/migrate.ts up",
+    "db:rollback": "tsx scripts/migrate.ts down",
     "build": "tsc -p tsconfig.json",
     "lint": "eslint .",
     "format": "prettier . --write",
@@ -20,7 +22,10 @@
     "node": ">=20.0.0"
   },
   "dependencies": {
-    "dotenv": "^17.4.2"
+    "dotenv": "^17.4.2",
+    "image-size": "^2.0.2",
+    "minio": "^8.0.7",
+    "mysql2": "^3.22.6"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>墨灵 AI 图片创作 - 消耗记录</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/billing-records.css" />
+  </head>
+  <body>
+    <div class="billing-shell">
+      <header class="billing-topbar">
+        <div class="brand">
+          <div class="brand-mark">MI</div>
+          <div>
+            <h1>消耗记录</h1>
+            <p id="billingSessionSummary">正在读取账户</p>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <a class="ghost-link" href="/">返回工作台</a>
+          <button id="billingRefreshButton" class="ghost-button" type="button">刷新</button>
+        </div>
+      </header>
+
+      <main class="billing-main">
+        <section class="billing-summary" aria-label="积分汇总">
+          <div class="summary-item">
+            <span>当前余额</span>
+            <strong id="balancePoints">--</strong>
+          </div>
+          <div class="summary-item">
+            <span>已预占</span>
+            <strong id="reservedPoints">--</strong>
+          </div>
+          <div class="summary-item">
+            <span>已释放</span>
+            <strong id="releasedPoints">--</strong>
+          </div>
+          <div class="summary-item">
+            <span>待对账</span>
+            <strong id="pendingPoints">--</strong>
+          </div>
+        </section>
+
+        <section class="billing-records-panel" aria-label="消耗明细">
+          <div class="billing-panel-heading">
+            <div>
+              <p class="eyebrow">BILLING EVENTS</p>
+              <h2>积分消耗明细</h2>
+            </div>
+            <span id="billingTotalText" class="status-pill">--</span>
+          </div>
+          <div id="billingError" class="error-banner" hidden></div>
+          <div id="billingRecordList" class="billing-record-list"></div>
+          <div class="billing-pagination">
+            <button id="billingPrevButton" class="ghost-button" type="button">上一页</button>
+            <span id="billingPageText">第 1 页</span>
+            <button id="billingNextButton" class="ghost-button" type="button">下一页</button>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/assets/billing-records.js"></script>
+  </body>
+</html>

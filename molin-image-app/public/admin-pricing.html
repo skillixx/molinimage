@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>价格规则管理 - 墨灵 AI 图片创作</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/admin-pricing.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">MI</div>
+        <div>
+          <h1>价格规则管理</h1>
+          <p>墨灵 AI 图片创作</p>
+        </div>
+      </div>
+      <a class="ghost-button admin-back" href="/">返回工作台</a>
+    </header>
+    <main class="admin-pricing-layout">
+      <section class="admin-rule-form" aria-labelledby="ruleFormTitle">
+        <div class="panel-heading compact">
+          <p class="eyebrow">PRICING RULE</p>
+          <h2 id="ruleFormTitle">新建规则</h2>
+        </div>
+        <form id="pricingRuleForm">
+          <input id="ruleId" type="hidden" />
+          <label class="field"
+            ><span>任务类型</span
+            ><select id="ruleTaskType" required>
+              <option value="text_to_image">文生图</option>
+              <option value="image_to_image">图生图</option>
+              <option value="image_restore">图片修复</option>
+              <option value="image_to_text">图生文</option>
+              <option value="upscale">高清放大</option>
+            </select></label
+          >
+          <div class="admin-field-grid">
+            <label class="field"
+              ><span>模型 code</span><input id="ruleModelCode" placeholder="留空表示全部"
+            /></label>
+            <label class="field"
+              ><span>模型能力</span><input id="ruleCapability" placeholder="留空表示全部"
+            /></label>
+            <label class="field"
+              ><span>质量</span
+              ><select id="ruleQuality">
+                <option value="">全部</option>
+                <option value="standard">标准</option>
+                <option value="hd">高清</option>
+              </select></label
+            >
+            <label class="field"
+              ><span>尺寸</span><input id="ruleImageSize" placeholder="例如 1024x1024"
+            /></label>
+            <label class="field"
+              ><span>高清倍率</span
+              ><select id="ruleUpscaleFactor">
+                <option value="">不限制</option>
+                <option value="2">2x</option>
+                <option value="4">4x</option>
+              </select></label
+            >
+            <label class="field"
+              ><span>每单位积分</span><input id="rulePoints" inputmode="decimal" required
+            /></label>
+          </div>
+          <label class="field"><span>用量类型</span><input id="ruleUsageType" required /></label>
+          <label class="admin-check"
+            ><input id="ruleActive" type="checkbox" checked /><span>启用规则</span></label
+          >
+          <div id="adminError" class="error-banner" hidden></div>
+          <div class="admin-form-actions">
+            <button class="primary-button" type="submit">保存规则</button
+            ><button id="resetRuleForm" class="ghost-button" type="button">取消编辑</button>
+          </div>
+        </form>
+      </section>
+      <section class="admin-rule-list" aria-labelledby="ruleListTitle">
+        <div class="panel-heading compact">
+          <p class="eyebrow">ACTIVE CONFIG</p>
+          <h2 id="ruleListTitle">规则列表</h2>
+        </div>
+        <div class="admin-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>匹配维度</th>
+                <th>积分</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="pricingRuleRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/assets/admin-pricing.js"></script>
+  </body>
+</html>

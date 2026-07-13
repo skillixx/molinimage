@@ -1,0 +1,86 @@
+.admin-back {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+.admin-pricing-layout {
+  display: grid;
+  grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
+  gap: 20px;
+  max-width: 1440px;
+  margin: 0 auto;
+  padding: 24px;
+}
+.admin-rule-form,
+.admin-rule-list {
+  min-width: 0;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.admin-rule-form form {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+.admin-field-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.field input {
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.admin-check,
+.admin-form-actions,
+.admin-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.admin-table-wrap {
+  margin-top: 16px;
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  padding: 12px 10px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  font-size: 13px;
+  vertical-align: middle;
+}
+th {
+  color: var(--muted);
+  font-weight: 600;
+}
+.admin-row-actions {
+  white-space: nowrap;
+}
+.admin-row-actions .ghost-button {
+  min-height: 30px;
+  padding: 0 10px;
+}
+.admin-empty {
+  padding: 32px;
+  color: var(--muted);
+  text-align: center;
+}
+@media (max-width: 900px) {
+  .admin-pricing-layout,
+  .admin-field-grid {
+    grid-template-columns: 1fr;
+  }
+}

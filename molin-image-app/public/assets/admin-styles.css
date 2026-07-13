@@ -1,0 +1,19 @@
+.admin-style-layout {
+  grid-template-columns: minmax(340px, 480px) minmax(0, 1fr);
+}
+
+.admin-style-layout textarea {
+  width: 100%;
+  min-height: 120px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  resize: vertical;
+}
+
+.admin-style-layout td {
+  white-space: pre-line;
+}

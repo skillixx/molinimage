@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>模型管理 - 墨灵 AI 图片创作</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/admin-pricing.css" />
+    <link rel="stylesheet" href="/assets/admin-models.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">MI</div>
+        <div>
+          <h1>模型管理</h1>
+          <p>墨灵 AI 图片创作</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button id="syncModels" class="ghost-button" type="button">同步目录</button>
+        <a class="ghost-button admin-back" href="/admin/pricing">价格规则</a>
+        <a class="ghost-button admin-back" href="/">返回工作台</a>
+      </div>
+    </header>
+    <main class="admin-pricing-layout admin-model-layout">
+      <section class="admin-rule-form" aria-labelledby="modelFormTitle">
+        <div class="panel-heading compact">
+          <p class="eyebrow">MODEL CONFIG</p>
+          <h2 id="modelFormTitle">选择模型</h2>
+        </div>
+        <form id="modelForm">
+          <input id="modelId" type="hidden" />
+          <label class="field"><span>模型 code</span><input id="modelCode" disabled /></label>
+          <label class="field"><span>展示名称</span><input id="displayName" required /></label>
+          <label class="field"><span>能力标签</span><input id="capability" required /></label>
+          <label class="field"
+            ><span>说明</span><textarea id="description" rows="4" required></textarea>
+          </label>
+          <label class="field"
+            ><span>支持任务类型</span
+            ><input id="supportedTaskTypes" placeholder="text_to_image,image_to_image"
+          /></label>
+          <label class="field"
+            ><span>默认任务类型</span><input id="defaultTaskTypes" placeholder="text_to_image"
+          /></label>
+          <div class="admin-field-grid">
+            <label class="field"
+              ><span>排序</span><input id="sortOrder" type="number" min="0"
+            /></label>
+            <label class="field"
+              ><span>最大输出数</span><input id="maxOutputCount" type="number" min="1"
+            /></label>
+          </div>
+          <label class="admin-check"
+            ><input id="adminEnabled" type="checkbox" /><span>用户端可见并允许提交</span></label
+          >
+          <div id="modelError" class="error-banner" hidden></div>
+          <div class="admin-form-actions">
+            <button class="primary-button" type="submit">保存模型</button>
+            <button id="resetModelForm" class="ghost-button" type="button">取消编辑</button>
+          </div>
+        </form>
+      </section>
+      <section class="admin-rule-list" aria-labelledby="modelListTitle">
+        <div class="panel-heading compact">
+          <p class="eyebrow">VISIBLE CONTROL</p>
+          <h2 id="modelListTitle">模型列表</h2>
+        </div>
+        <div class="admin-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th>能力/任务</th>
+                <th>默认</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="modelRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/assets/admin-models.js"></script>
+  </body>
+</html>

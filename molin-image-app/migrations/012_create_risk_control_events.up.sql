@@ -1,0 +1,22 @@
+CREATE TABLE IF NOT EXISTS risk_control_events (
+  id VARCHAR(64) NOT NULL COMMENT '风控事件 ID，由应用生成',
+  request_id VARCHAR(128) NULL COMMENT 'HTTP 请求 ID，方便串联接口日志',
+  owner_user_id BIGINT UNSIGNED NOT NULL COMMENT '触发请求的墨灵用户 ID',
+  ip_address VARCHAR(64) NOT NULL COMMENT '请求来源 IP，用于 IP 级限流',
+  task_type VARCHAR(64) NOT NULL COMMENT '图片任务类型',
+  gateway_model_code VARCHAR(128) NULL COMMENT '请求使用的 AI 网关模型 code',
+  gateway_capability VARCHAR(64) NULL COMMENT '请求使用的 AI 网关能力标签',
+  decision ENUM('allow', 'block') NOT NULL COMMENT '风控判定结果',
+  reason_code VARCHAR(64) NOT NULL COMMENT '风控原因码',
+  reason_message VARCHAR(255) NOT NULL COMMENT '中文原因说明',
+  window_seconds INT UNSIGNED NULL COMMENT '限流统计窗口秒数',
+  limit_count INT UNSIGNED NULL COMMENT '命中的限流阈值',
+  observed_count INT UNSIGNED NULL COMMENT '窗口内已观察到的请求次数',
+  metadata_json JSON NULL COMMENT '扩展上下文，禁止写入密钥和隐私原文',
+  created_at TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (id),
+  KEY idx_risk_control_owner_created (owner_user_id, created_at),
+  KEY idx_risk_control_ip_created (ip_address, created_at),
+  KEY idx_risk_control_decision_created (decision, created_at),
+  KEY idx_risk_control_reason_created (reason_code, created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='图片任务限流与风控审计事件';

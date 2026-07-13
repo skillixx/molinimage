@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>风格模板管理 - 墨灵 AI 图片创作</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/admin-pricing.css" />
+    <link rel="stylesheet" href="/assets/admin-styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">MI</div>
+        <div>
+          <h1>风格模板管理</h1>
+          <p>墨灵 AI 图片创作</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <a class="ghost-button admin-back" href="/admin/models">模型管理</a>
+        <a class="ghost-button admin-back" href="/admin/pricing">价格规则</a>
+        <a class="ghost-button admin-back" href="/">返回工作台</a>
+      </div>
+    </header>
+    <main class="admin-pricing-layout admin-style-layout">
+      <section class="admin-rule-form" aria-labelledby="styleFormTitle">
+        <div class="panel-heading compact">
+          <p class="eyebrow">STYLE PRESET</p>
+          <h2 id="styleFormTitle">新建模板</h2>
+        </div>
+        <form id="stylePresetForm">
+          <input id="presetId" type="hidden" />
+          <label class="field"><span>模板名称</span><input id="presetName" required /></label>
+          <div class="admin-field-grid">
+            <label class="field"><span>模板分类</span><input id="presetCategory" required /></label>
+            <label class="field"
+              ><span>任务类型</span
+              ><select id="presetTaskType" required>
+                <option value="text_to_image">文生图</option>
+                <option value="image_to_image">图生图</option>
+                <option value="image_restore">图片修复</option>
+              </select></label
+            >
+          </div>
+          <label class="field"
+            ><span>Prompt 模板</span
+            ><textarea id="presetPromptTemplate" rows="5" required></textarea>
+          </label>
+          <label class="field"><span>预览图 URL</span><input id="presetPreviewUrl" /></label>
+          <div class="admin-field-grid">
+            <label class="field"
+              ><span>排序</span><input id="presetSortOrder" type="number" min="0"
+            /></label>
+            <label class="admin-check"
+              ><input id="presetEnabled" type="checkbox" checked /><span>启用模板</span></label
+            >
+          </div>
+          <div id="styleError" class="error-banner" hidden></div>
+          <div class="admin-form-actions">
+            <button class="primary-button" type="submit">保存模板</button>
+            <button id="resetStyleForm" class="ghost-button" type="button">取消编辑</button>
+          </div>
+        </form>
+      </section>
+      <section class="admin-rule-list" aria-labelledby="styleListTitle">
+        <div class="panel-heading compact">
+          <p class="eyebrow">VISIBLE TEMPLATES</p>
+          <h2 id="styleListTitle">模板列表</h2>
+        </div>
+        <div class="admin-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>模板</th>
+                <th>分类/任务</th>
+                <th>Prompt</th>
+                <th>排序</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="stylePresetRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/assets/admin-styles.js"></script>
+  </body>
+</html>
