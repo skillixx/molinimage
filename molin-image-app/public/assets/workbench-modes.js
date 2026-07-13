@@ -45,17 +45,12 @@ export const imageSizeOptions = [
   { value: "512x512", label: "512 x 512 · 小方图" },
   { value: "768x768", label: "768 x 768 · 方图" },
   { value: "1024x1024", label: "1024 x 1024 · 标准方图" },
-  { value: "1536x1536", label: "1536 x 1536 · 高清方图" },
   { value: "512x768", label: "512 x 768 · 小竖图" },
   { value: "768x1024", label: "768 x 1024 · 竖图" },
   { value: "1024x1536", label: "1024 x 1536 · 海报竖图" },
-  { value: "1536x2048", label: "1536 x 2048 · 高清竖图" },
   { value: "768x512", label: "768 x 512 · 小横图" },
   { value: "1024x768", label: "1024 x 768 · 横图" },
-  { value: "1536x1024", label: "1536 x 1024 · 封面横图" },
-  { value: "2048x1536", label: "2048 x 1536 · 高清横图" },
-  { value: "1024x1792", label: "1024 x 1792 · 长竖图" },
-  { value: "1792x1024", label: "1792 x 1024 · 宽横图" }
+  { value: "1536x1024", label: "1536 x 1024 · 封面横图" }
 ];
 
 export function hasStylePresetSupport(taskType) {

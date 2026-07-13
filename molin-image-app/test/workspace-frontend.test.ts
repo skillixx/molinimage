@@ -109,10 +109,12 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风�
   assert.match(html, /data-mode="image_to_text"/);
   assert.match(html, /data-mode="upscale"/);
   assert.match(html, /id="upscaleFactorSelect"/);
-  assert.match(html, /1792x1024/);
-  assert.match(html, /2048x1536/);
+  assert.match(html, /768x1024/);
+  assert.match(html, /1536x1024/);
+  assert.doesNotMatch(html, /1792x1024/);
+  assert.doesNotMatch(html, /2048x1536/);
   assert.match(workbenchModes, /imageSizeOptions/);
-  assert.match(workbenchModes, /1536x2048/);
+  assert.doesNotMatch(workbenchModes, /1536x2048/);
   assert.match(workbench, /renderImageSizeOptions/);
   assert.match(workbench, /supported_image_sizes/);
   assert.match(workbench, /当前模型不支持/);
