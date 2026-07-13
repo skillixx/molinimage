@@ -95,6 +95,7 @@ void test("前端 API 封装只访问应用后端接口", async () => {
 void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风格模板体验", async () => {
   const html = await readFile(resolve("public", "index.html"), "utf8");
   const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
+  const workbenchModes = await readFile(resolve("public", "assets", "workbench-modes.js"), "utf8");
   const taskDetailFormat = await readFile(
     resolve("public", "assets", "task-detail-format.js"),
     "utf8"
@@ -108,6 +109,13 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风�
   assert.match(html, /data-mode="image_to_text"/);
   assert.match(html, /data-mode="upscale"/);
   assert.match(html, /id="upscaleFactorSelect"/);
+  assert.match(html, /1792x1024/);
+  assert.match(html, /2048x1536/);
+  assert.match(workbenchModes, /imageSizeOptions/);
+  assert.match(workbenchModes, /1536x2048/);
+  assert.match(workbench, /renderImageSizeOptions/);
+  assert.match(workbench, /supported_image_sizes/);
+  assert.match(workbench, /当前模型不支持/);
   assert.match(html, /id="taskDetailDrawer"/);
   assert.match(workbench, /state\.estimate\?\.enough_balance === true/);
   assert.match(workbench, /renderProgress\("generating"\)/);

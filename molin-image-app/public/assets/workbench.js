@@ -16,7 +16,7 @@ import {
   formatTaskStatus,
   resolveTaskFailureMessage
 } from "./task-detail-format.js";
-import { hasStylePresetSupport, modeConfig } from "./workbench-modes.js";
+import { hasStylePresetSupport, imageSizeOptions, modeConfig } from "./workbench-modes.js";
 
 const state = {
   mode: "text_to_image",
@@ -89,6 +89,7 @@ elements.upscaleFactorSelect.addEventListener("change", () => {
   void refreshEstimate();
 });
 elements.modelSelect.addEventListener("change", () => {
+  renderImageSizeOptions();
   void refreshEstimate();
 });
 elements.qualitySelect.addEventListener("change", () => {
@@ -133,6 +134,7 @@ for (const tab of elements.modeTabs) {
     elements.resultList.replaceChildren();
     renderMode();
     renderModelOptions();
+    renderImageSizeOptions();
     renderStylePresetOptions();
     renderStylePresetList();
     renderProgress("idle");
@@ -162,6 +164,7 @@ async function bootstrapWorkbench() {
     );
     renderMode();
     renderModelOptions();
+    renderImageSizeOptions();
     renderStylePresetOptions();
     renderStylePresetList();
     renderModelList(modelCatalog);
@@ -175,6 +178,7 @@ async function bootstrapWorkbench() {
     setModelHealth("模型不可用", "warning");
     renderMode();
     renderModelOptions();
+    renderImageSizeOptions();
     renderStylePresetOptions();
     renderStylePresetList();
     renderModelList({ items: [], message: "请从墨灵平台进入应用后重试。" });
@@ -937,6 +941,40 @@ function renderModelOptions() {
   }
 }
 
+function renderImageSizeOptions() {
+  const previousValue = elements.sizeSelect.value || "1024x1024";
+  const selectedModel = currentSelectedModel();
+  const supportedSizes = Array.isArray(selectedModel?.supported_image_sizes)
+    ? selectedModel.supported_image_sizes
+    : [];
+  const hasSizeLimit = supportedSizes.length > 0;
+  const firstEnabled =
+    imageSizeOptions.find((size) => !hasSizeLimit || supportedSizes.includes(size.value))?.value ??
+    "";
+
+  elements.sizeSelect.replaceChildren();
+
+  for (const size of imageSizeOptions) {
+    const option = document.createElement("option");
+    const isSupported = !hasSizeLimit || supportedSizes.includes(size.value);
+
+    option.value = size.value;
+    option.textContent = isSupported ? size.label : `${size.label}（当前模型不支持）`;
+    option.disabled = !isSupported;
+    elements.sizeSelect.append(option);
+  }
+
+  // 当前模型可能只开放部分尺寸；切换模型后自动选择可用尺寸，避免提交时才被后端拦截。
+  elements.sizeSelect.value =
+    !hasSizeLimit || supportedSizes.includes(previousValue) ? previousValue : firstEnabled;
+}
+
+function currentSelectedModel() {
+  const modelCode = elements.modelSelect.value;
+
+  return state.models.find((model) => model.gateway_model_code === modelCode);
+}
+
 function renderStylePresetOptions() {
   const presets = currentModeStylePresets();
   const select =
@@ -1471,6 +1509,7 @@ function useTaskForReedit(task, file) {
   elements.countSelect.value = "1";
   setSelectValueIfAvailable(elements.editModeSelect, task.style_preset_id);
   setSelectValueIfAvailable(elements.modelSelect, task.gateway_model_code);
+  renderImageSizeOptions();
   setSelectValueIfAvailable(elements.sizeSelect, task.image_size);
   setSelectValueIfAvailable(elements.countSelect, String(task.image_count));
   renderStylePresetList();
