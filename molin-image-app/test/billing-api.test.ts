@@ -10,9 +10,11 @@ import type {
   MolingLaunchIdentity
 } from "../src/infrastructure/moling/moling-client.js";
 import type {
+  BillingBalanceResult,
   BillingEstimateResult,
   EstimateBillingRequest
 } from "../src/modules/billing/billing-service.js";
+import type { BillingRecordListResult } from "../src/modules/billing/billing-record-service.js";
 import type { PricingRuleRecord } from "../src/infrastructure/database/pricing-rules-repository.js";
 import type { SavePricingRuleRequest } from "../src/modules/billing/pricing-rule-service.js";
 
@@ -114,6 +116,74 @@ void test("高清放大计费接口把倍率传给价格规则", async () => {
   }
 });
 
+void test("余额接口必须登录并使用当前 session 权益查询", async () => {
+  const billingService = new FakeBillingService();
+  const app = await startTestApp(billingService);
+
+  try {
+    const unauthorizedResponse = await fetch(`${app.baseUrl}/api/billing/balance`);
+    const cookie = await createSessionCookie(app.baseUrl);
+    const response = await fetch(`${app.baseUrl}/api/billing/balance`, { headers: { cookie } });
+    const body = (await response.json()) as BillingBalanceResult;
+
+    assert.equal(unauthorizedResponse.status, 401);
+    assert.equal(response.status, 200);
+    assert.deepEqual(billingService.balanceRequests[0], {
+      ownerUserId: 479,
+      entitlementId: 62
+    });
+    assert.equal(body.balance_points, "100");
+    assert.equal(body.usable, true);
+  } finally {
+    await app.close();
+  }
+});
+
+void test("消耗记录接口必须登录且只能按当前用户查询", async () => {
+  const billingRecordService = new FakeBillingRecordService();
+  const app = await startTestApp(new FakeBillingService(), undefined, billingRecordService);
+
+  try {
+    const unauthorizedResponse = await fetch(`${app.baseUrl}/api/billing/records`);
+    const cookie = await createSessionCookie(app.baseUrl);
+    const response = await fetch(`${app.baseUrl}/api/billing/records?page=2&page_size=10`, {
+      headers: { cookie }
+    });
+    const body = (await response.json()) as BillingRecordListResult;
+
+    assert.equal(unauthorizedResponse.status, 401);
+    assert.equal(response.status, 200);
+    assert.deepEqual(billingRecordService.requests[0], {
+      ownerUserId: 479,
+      page: 2,
+      pageSize: 10
+    });
+    assert.equal(body.items[0]?.task_id, "task_record_001");
+    assert.equal(body.items[0]?.task_detail_url, "/?task_id=task_record_001");
+    assert.equal(body.summary.pending_points, "6");
+  } finally {
+    await app.close();
+  }
+});
+
+void test("登录用户可以打开余额与消耗页面", async () => {
+  const app = await startTestApp(
+    new FakeBillingService(),
+    undefined,
+    new FakeBillingRecordService()
+  );
+
+  try {
+    const cookie = await createSessionCookie(app.baseUrl);
+    const page = await fetch(`${app.baseUrl}/billing`, { headers: { cookie } });
+
+    assert.equal(page.status, 200);
+    assert.match(await page.text(), /消耗记录/);
+  } finally {
+    await app.close();
+  }
+});
+
 void test("价格规则管理接口要求内部令牌并支持创建和禁用规则", async () => {
   const billingService = new FakeBillingService();
   const pricingRuleService = new FakePricingRuleService();
@@ -175,6 +245,7 @@ void test("管理员可通过墨灵会话打开价格页面并管理规则", asy
 
 class FakeBillingService {
   readonly requests: EstimateBillingRequest[] = [];
+  readonly balanceRequests: { ownerUserId: number; entitlementId?: number | null }[] = [];
 
   estimate(request: EstimateBillingRequest): Promise<BillingEstimateResult> {
     this.requests.push(request);
@@ -192,6 +263,66 @@ class FakeBillingService {
       enough_balance: true,
       rule_id: null,
       rule_source: "env"
+    });
+  }
+
+  getBalance(input: {
+    ownerUserId: number;
+    entitlementId?: number | null;
+  }): Promise<BillingBalanceResult> {
+    this.balanceRequests.push(input);
+
+    return Promise.resolve({
+      owner_user_id: input.ownerUserId,
+      entitlement_id: input.entitlementId ?? 62,
+      balance_points: "100",
+      usable: true
+    });
+  }
+}
+
+class FakeBillingRecordService {
+  readonly requests: { ownerUserId: number; page?: number; pageSize?: number }[] = [];
+
+  listUserRecords(input: {
+    ownerUserId: number;
+    page?: number;
+    pageSize?: number;
+  }): Promise<BillingRecordListResult> {
+    this.requests.push(input);
+
+    return Promise.resolve({
+      items: [
+        {
+          id: "billing_record_001",
+          task_id: "task_record_001",
+          task_type: "text_to_image",
+          task_status: "succeeded",
+          event_type: "reserve",
+          event_type_label: "预占",
+          amount_points: "6",
+          display_amount_points: "-6",
+          status: "reserved",
+          status_label: "已预占",
+          billing_stage: "reserved",
+          task_detail_url: "/?task_id=task_record_001",
+          error_code: null,
+          error_message: null,
+          created_at: "2026-07-13T00:00:00.000Z",
+          updated_at: "2026-07-13T00:00:00.000Z"
+        }
+      ],
+      page: input.page ?? 1,
+      page_size: input.pageSize ?? 20,
+      total: 1,
+      summary: {
+        reserved_points: "6",
+        settled_points: "0",
+        released_points: "0",
+        pending_points: "6",
+        net_spent_points: "0",
+        record_count: 1
+      }
     });
   }
 }
@@ -260,7 +391,8 @@ class FakeLaunchTicketVerifier implements LaunchTicketVerifier {
 
 async function startTestApp(
   billingService: FakeBillingService,
-  pricingRuleService?: FakePricingRuleService
+  pricingRuleService?: FakePricingRuleService,
+  billingRecordService?: FakeBillingRecordService
 ): Promise<{
   baseUrl: string;
   close: () => Promise<void>;
@@ -269,6 +401,7 @@ async function startTestApp(
     createAppRequestHandler(testConfig, {
       launchTicketVerifier: new FakeLaunchTicketVerifier(),
       billingService,
+      billingRecordService,
       pricingRuleService
     })
   );

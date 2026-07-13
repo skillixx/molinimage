@@ -6,6 +6,8 @@ import { extname, normalize, resolve, sep } from "node:path";
 import type { AppConfig } from "../config/app-config.js";
 import type { BillingService } from "../modules/billing/billing-service.js";
 import { BillingServiceError } from "../modules/billing/billing-service.js";
+import type { BillingRecordService } from "../modules/billing/billing-record-service.js";
+import { BillingRecordServiceError } from "../modules/billing/billing-record-service.js";
 import type { BillingReconciliationService } from "../modules/billing/billing-reconciliation-service.js";
 import { BillingReconciliationServiceError } from "../modules/billing/billing-reconciliation-service.js";
 import type {
@@ -63,7 +65,8 @@ export interface AppDependencies {
     | "retryTask"
     | "transitionTask"
   >;
-  billingService?: Pick<BillingService, "estimate">;
+  billingService?: Pick<BillingService, "estimate" | "getBalance">;
+  billingRecordService?: Pick<BillingRecordService, "listUserRecords">;
   billingReconciliationService?: Pick<
     BillingReconciliationService,
     "listPending" | "retryRelease" | "retrySettle"
@@ -186,6 +189,17 @@ async function handleRequest(
     }
 
     await servePublicFile(response, requestId, "index.html");
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/billing") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    // 消耗记录页包含用户积分流水，只允许已建立墨灵应用 session 的用户访问。
+    await servePublicFile(response, requestId, "billing.html");
     return;
   }
 
@@ -558,6 +572,56 @@ async function handleRequest(
       requestId,
       session.user_id,
       dependencies.billingService
+    );
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/billing/balance") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (dependencies.billingService === undefined) {
+      writeError(response, 503, requestId, "BILLING_SERVICE_UNAVAILABLE", "计费服务暂不可用。");
+      return;
+    }
+
+    // 余额查询使用当前 session 的 user_id 和 entitlement_id，浏览器不能指定他人权益。
+    await handleBillingBalance(
+      response,
+      requestId,
+      session.user_id,
+      session.entitlement_id,
+      dependencies.billingService
+    );
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/billing/records") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (dependencies.billingRecordService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "BILLING_RECORD_SERVICE_UNAVAILABLE",
+        "消耗记录服务暂不可用。"
+      );
+      return;
+    }
+
+    // 消耗记录只允许按当前 session 用户分页读取，避免 URL 参数越权查询其他用户流水。
+    await handleBillingRecords(
+      url,
+      response,
+      requestId,
+      session.user_id,
+      dependencies.billingRecordService
     );
     return;
   }
@@ -1002,6 +1066,48 @@ async function handleBillingEstimate(
     });
 
     writeJson(response, 200, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+async function handleBillingBalance(
+  response: ServerResponse,
+  requestId: string,
+  ownerUserId: number,
+  entitlementId: number | undefined,
+  billingService: Pick<BillingService, "getBalance">
+): Promise<void> {
+  try {
+    writeJson(
+      response,
+      200,
+      await billingService.getBalance({
+        ownerUserId,
+        entitlementId
+      })
+    );
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+async function handleBillingRecords(
+  url: URL,
+  response: ServerResponse,
+  requestId: string,
+  ownerUserId: number,
+  billingRecordService: Pick<BillingRecordService, "listUserRecords">
+): Promise<void> {
+  try {
+    // 这里不读取 owner_user_id 查询参数，确保服务层始终使用当前 session 的用户身份。
+    const records = await billingRecordService.listUserRecords({
+      ownerUserId,
+      page: readPositiveIntegerQuery(url, "page", 1),
+      pageSize: readPositiveIntegerQuery(url, "page_size", 20)
+    });
+
+    writeJson(response, 200, records);
   } catch (error: unknown) {
     writePublicError(response, requestId, error);
   }
@@ -1744,6 +1850,11 @@ function writePublicError(response: ServerResponse, requestId: string, error: un
   }
 
   if (error instanceof BillingServiceError) {
+    writeError(response, error.statusCode, requestId, error.code, error.message);
+    return;
+  }
+
+  if (error instanceof BillingRecordServiceError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
     return;
   }

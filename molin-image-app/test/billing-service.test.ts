@@ -3,6 +3,8 @@ import test from "node:test";
 
 import type {
   BillingEventRecord,
+  BillingEventSummaryRecord,
+  BillingEventWithTaskRecord,
   BillingEventsRepository,
   ClaimSettleBillingEventInput,
   CompleteSettleBillingEventInput,
@@ -630,6 +632,54 @@ class InMemoryBillingEventsRepository implements BillingEventsRepository {
   findByIdempotencyKey(idempotencyKey: string): Promise<BillingEventRecord | undefined> {
     return Promise.resolve(this.events.find((event) => event.idempotency_key === idempotencyKey));
   }
+
+  findByOwner(input: {
+    ownerUserId: number;
+    page: number;
+    pageSize: number;
+  }): Promise<{ items: BillingEventWithTaskRecord[]; total: number }> {
+    const items = this.events
+      .filter((event) => event.owner_user_id === input.ownerUserId)
+      .map((event) => ({
+        ...event,
+        task_type: "text_to_image",
+        task_status: "succeeded",
+        task_error_code: null,
+        task_created_at: event.created_at
+      }));
+
+    return Promise.resolve({
+      items: items.slice((input.page - 1) * input.pageSize, input.page * input.pageSize),
+      total: items.length
+    });
+  }
+
+  summarizeByOwner(ownerUserId: number): Promise<BillingEventSummaryRecord> {
+    const ownerEvents = this.events.filter((event) => event.owner_user_id === ownerUserId);
+
+    return Promise.resolve({
+      reserved_points: sumEventPoints(ownerEvents, (event) => event.event_type === "reserve"),
+      settled_points: sumEventPoints(
+        ownerEvents,
+        (event) => event.event_type === "settle" && event.status === "settled"
+      ),
+      released_points: sumEventPoints(
+        ownerEvents,
+        (event) => event.event_type === "release" && event.status === "released"
+      ),
+      pending_points: sumEventPoints(ownerEvents, (event) => event.status.endsWith("_pending")),
+      record_count: ownerEvents.length
+    });
+  }
+}
+
+function sumEventPoints(
+  events: BillingEventRecord[],
+  predicate: (event: BillingEventRecord) => boolean
+): string {
+  return String(
+    events.filter(predicate).reduce((total, event) => total + BigInt(event.amount_points), 0n)
+  );
 }
 
 class FlakySettleGateway extends MockEntitlementReserveGateway {

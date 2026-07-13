@@ -23,6 +23,7 @@ import { MySqlStylePresetsRepository } from "../infrastructure/database/style-pr
 import { MolingClient } from "../infrastructure/moling/moling-client.js";
 import { MinioStorageService } from "../infrastructure/storage/minio-storage-service.js";
 import { BillingService } from "../modules/billing/billing-service.js";
+import { BillingRecordService } from "../modules/billing/billing-record-service.js";
 import { BillingReconciliationService } from "../modules/billing/billing-reconciliation-service.js";
 import { PricingRuleService } from "../modules/billing/pricing-rule-service.js";
 import { ConsoleImageTaskAuditLogger } from "../infrastructure/audit/console-image-task-audit-logger.js";
@@ -61,6 +62,7 @@ const billingService = new BillingService(
   molingClient,
   pricingRulesRepository
 );
+const billingRecordService = new BillingRecordService(billingEventsRepository);
 const pricingRuleAuditLogger = new ConsolePricingRuleAuditLogger();
 const pricingRuleService = new PricingRuleService(pricingRulesRepository, pricingRuleAuditLogger);
 const stylePresetService = new StylePresetService(stylePresetsRepository);
@@ -107,6 +109,7 @@ const server = createServer(
     imageModelService,
     imageTaskService,
     billingService,
+    billingRecordService,
     billingReconciliationService,
     pricingRuleService,
     stylePresetService,

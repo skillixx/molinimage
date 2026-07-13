@@ -204,6 +204,7 @@ async function bootstrapWorkbench() {
     renderModelList(modelCatalog);
     renderProgress("idle");
     await Promise.all([refreshEstimate(), refreshHistory()]);
+    openInitialTaskDetailFromUrl();
   } catch (error) {
     elements.sessionSummary.textContent = "未建立应用会话";
     state.models = [];
@@ -217,6 +218,16 @@ async function bootstrapWorkbench() {
     renderProgress("idle");
     showError(error instanceof Error ? error.message : "工作台加载失败。");
   }
+}
+
+function openInitialTaskDetailFromUrl() {
+  const taskId = new URLSearchParams(window.location.search).get("task_id");
+
+  if (taskId === null || taskId.trim().length === 0) {
+    return;
+  }
+
+  void openTaskDetail(taskId);
 }
 
 function renderMode() {

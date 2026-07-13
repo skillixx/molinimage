@@ -209,6 +209,23 @@ void test("对账管理页覆盖待对账列表、重试结算、重试释放和
   assert.match(apiClient, /retry-release/);
 });
 
+void test("余额与消耗页覆盖积分汇总、消耗记录和任务详情跳转", async () => {
+  const html = await readFile(resolve("public", "billing.html"), "utf8");
+  const script = await readFile(resolve("public", "assets", "billing-records.js"), "utf8");
+  const apiClient = await readFile(resolve("public", "assets", "api-client.js"), "utf8");
+
+  assert.match(html, /消耗记录/);
+  assert.match(html, /id="balancePoints"/);
+  assert.match(html, /id="billingRecordList"/);
+  assert.match(html, /id="billingPrevButton"/);
+  assert.match(script, /getBillingRecords/);
+  assert.match(script, /getBillingBalance/);
+  assert.match(script, /record\.task_detail_url/);
+  assert.match(script, /status_label/);
+  assert.doesNotMatch(script, /\bfetch\(/);
+  assert.match(apiClient, /\/api\/billing\/records/);
+});
+
 class FakeLaunchTicketVerifier implements LaunchTicketVerifier {
   verifyLaunchTicket(): Promise<MolingLaunchIdentity> {
     return Promise.resolve({

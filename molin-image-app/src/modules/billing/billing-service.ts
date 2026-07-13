@@ -47,6 +47,13 @@ export interface BillingEstimateResult {
   rule_source: "env" | "database";
 }
 
+export interface BillingBalanceResult {
+  owner_user_id: number;
+  entitlement_id: number;
+  balance_points: string;
+  usable: boolean;
+}
+
 export interface ReserveBillingRequest extends EstimateBillingRequest {
   taskId: string;
   entitlementId?: number;
@@ -117,6 +124,10 @@ export interface EntitlementSettleGateway {
   settle(input: EntitlementSettleInput): Promise<EntitlementSettleResult>;
 }
 
+export interface EntitlementBalanceGateway {
+  getBalance(input: EntitlementBalanceInput): Promise<EntitlementBalanceResult>;
+}
+
 export interface EntitlementReserveInput {
   userId: number;
   entitlementId?: number;
@@ -148,6 +159,17 @@ export interface EntitlementSettleResult {
   reserveId: string | null;
 }
 
+export interface EntitlementBalanceInput {
+  userId: number;
+  entitlementId: number;
+}
+
+export interface EntitlementBalanceResult {
+  entitlementId: number;
+  balancePoints: string;
+  usable: boolean;
+}
+
 export class BillingServiceError extends Error {
   constructor(
     public readonly code: string,
@@ -167,7 +189,8 @@ export class BillingService {
     private readonly repository: BillingEventsRepository,
     private readonly gateway: EntitlementReserveGateway &
       EntitlementReleaseGateway &
-      EntitlementSettleGateway,
+      EntitlementSettleGateway &
+      EntitlementBalanceGateway,
     private readonly pricingRulesRepository?: Pick<PricingRulesRepository, "listAll">
   ) {
     this.rules = parseBillingRules(rulesJson);
@@ -195,6 +218,36 @@ export class BillingService {
       enough_balance: compareDecimal(balancePoints, estimatedPoints) >= 0,
       rule_id: "id" in rule ? rule.id : null,
       rule_source: "id" in rule ? "database" : "env"
+    };
+  }
+
+  async getBalance(input: {
+    ownerUserId: number;
+    entitlementId?: number | null;
+  }): Promise<BillingBalanceResult> {
+    if (input.entitlementId === undefined || input.entitlementId === null) {
+      throw new BillingServiceError(
+        "BILLING_ENTITLEMENT_REQUIRED",
+        "当前用户缺少可用权益额度。",
+        402
+      );
+    }
+
+    if (!Number.isInteger(input.entitlementId) || input.entitlementId < 1) {
+      throw new BillingServiceError("BILLING_ENTITLEMENT_INVALID", "权益 ID 不合法。", 400);
+    }
+
+    // 余额查询只用于用户体验展示；真正防透支仍以 reserve 的平台原子预占结果为准。
+    const balance = await this.gateway.getBalance({
+      userId: input.ownerUserId,
+      entitlementId: input.entitlementId
+    });
+
+    return {
+      owner_user_id: input.ownerUserId,
+      entitlement_id: balance.entitlementId,
+      balance_points: balance.balancePoints,
+      usable: balance.usable
     };
   }
 
@@ -523,7 +576,11 @@ export class BillingService {
 }
 
 export class MockEntitlementReserveGateway
-  implements EntitlementReserveGateway, EntitlementReleaseGateway, EntitlementSettleGateway
+  implements
+    EntitlementReserveGateway,
+    EntitlementReleaseGateway,
+    EntitlementSettleGateway,
+    EntitlementBalanceGateway
 {
   private readonly releasedReserveIds = new Set<string>();
   private settleCallCount = 0;
@@ -572,6 +629,14 @@ export class MockEntitlementReserveGateway
 
     return Promise.resolve({
       reserveId: input.reserveId
+    });
+  }
+
+  getBalance(input: EntitlementBalanceInput): Promise<EntitlementBalanceResult> {
+    return Promise.resolve({
+      entitlementId: input.entitlementId,
+      balancePoints: this.balancePoints,
+      usable: true
     });
   }
 }

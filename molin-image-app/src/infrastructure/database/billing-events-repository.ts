@@ -17,6 +17,21 @@ export interface BillingEventRecord {
   updated_at: string;
 }
 
+export interface BillingEventWithTaskRecord extends BillingEventRecord {
+  task_type: string | null;
+  task_status: string | null;
+  task_error_code: string | null;
+  task_created_at: string | null;
+}
+
+export interface BillingEventSummaryRecord {
+  reserved_points: string;
+  settled_points: string;
+  released_points: string;
+  pending_points: string;
+  record_count: number;
+}
+
 export interface CreateReservedBillingEventInput {
   id: string;
   owner_user_id: number;
@@ -84,9 +99,17 @@ export interface BillingEventsRepository {
   completeRelease(input: CompleteReleaseBillingEventInput): Promise<BillingEventRecord>;
   findById(eventId: string): Promise<BillingEventRecord | undefined>;
   findByIdempotencyKey(idempotencyKey: string): Promise<BillingEventRecord | undefined>;
+  findByOwner(input: {
+    ownerUserId: number;
+    page: number;
+    pageSize: number;
+  }): Promise<{ items: BillingEventWithTaskRecord[]; total: number }>;
+  summarizeByOwner(ownerUserId: number): Promise<BillingEventSummaryRecord>;
 }
 
 interface BillingEventRow extends RowDataPacket, BillingEventRecord {}
+interface BillingEventWithTaskRow extends RowDataPacket, BillingEventWithTaskRecord {}
+interface BillingEventSummaryRow extends RowDataPacket, BillingEventSummaryRecord {}
 
 export class MySqlBillingEventsRepository implements BillingEventsRepository {
   constructor(private readonly pool: Pool) {}
@@ -361,6 +384,78 @@ export class MySqlBillingEventsRepository implements BillingEventsRepository {
     );
 
     return rows[0];
+  }
+
+  async findByOwner(input: {
+    ownerUserId: number;
+    page: number;
+    pageSize: number;
+  }): Promise<{ items: BillingEventWithTaskRecord[]; total: number }> {
+    const offset = (input.page - 1) * input.pageSize;
+    const [countRows] = await this.pool.execute<(RowDataPacket & { total: number })[]>(
+      `SELECT COUNT(*) AS total
+       FROM billing_events
+       WHERE owner_user_id = ?`,
+      [input.ownerUserId]
+    );
+    const [rows] = await this.pool.execute<BillingEventWithTaskRow[]>(
+      `SELECT
+        billing_events.id,
+        billing_events.owner_user_id,
+        billing_events.task_id,
+        billing_events.event_type,
+        CAST(billing_events.amount_points AS CHAR) AS amount_points,
+        billing_events.status,
+        billing_events.idempotency_key,
+        billing_events.moling_reserve_id,
+        billing_events.moling_entitlement_id,
+        billing_events.error_code,
+        billing_events.error_message,
+        billing_events.retry_count,
+        DATE_FORMAT(billing_events.created_at, '%Y-%m-%dT%H:%i:%s.%fZ') AS created_at,
+        DATE_FORMAT(billing_events.updated_at, '%Y-%m-%dT%H:%i:%s.%fZ') AS updated_at,
+        image_tasks.task_type,
+        image_tasks.status AS task_status,
+        image_tasks.error_code AS task_error_code,
+        DATE_FORMAT(image_tasks.created_at, '%Y-%m-%dT%H:%i:%s.%fZ') AS task_created_at
+       FROM billing_events
+       LEFT JOIN image_tasks
+        ON image_tasks.id = billing_events.task_id
+        AND image_tasks.owner_user_id = billing_events.owner_user_id
+       WHERE billing_events.owner_user_id = ?
+       ORDER BY billing_events.created_at DESC, billing_events.id DESC
+       LIMIT ? OFFSET ?`,
+      [input.ownerUserId, input.pageSize, offset]
+    );
+
+    return {
+      items: rows,
+      total: countRows[0]?.total ?? 0
+    };
+  }
+
+  async summarizeByOwner(ownerUserId: number): Promise<BillingEventSummaryRecord> {
+    const [rows] = await this.pool.execute<BillingEventSummaryRow[]>(
+      `SELECT
+        CAST(COALESCE(SUM(CASE WHEN event_type = 'reserve' THEN amount_points ELSE 0 END), 0) AS CHAR) AS reserved_points,
+        CAST(COALESCE(SUM(CASE WHEN event_type = 'settle' AND status = 'settled' THEN amount_points ELSE 0 END), 0) AS CHAR) AS settled_points,
+        CAST(COALESCE(SUM(CASE WHEN event_type = 'release' AND status = 'released' THEN amount_points ELSE 0 END), 0) AS CHAR) AS released_points,
+        CAST(COALESCE(SUM(CASE WHEN status IN ('settle_pending', 'release_pending', 'settling', 'releasing') THEN amount_points ELSE 0 END), 0) AS CHAR) AS pending_points,
+        COUNT(*) AS record_count
+       FROM billing_events
+       WHERE owner_user_id = ?`,
+      [ownerUserId]
+    );
+
+    return (
+      rows[0] ?? {
+        reserved_points: "0",
+        settled_points: "0",
+        released_points: "0",
+        pending_points: "0",
+        record_count: 0
+      }
+    );
   }
 }
 

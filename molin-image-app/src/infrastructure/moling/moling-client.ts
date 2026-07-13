@@ -6,6 +6,9 @@ import type {
   EntitlementReserveGateway,
   EntitlementReserveInput,
   EntitlementReserveResult,
+  EntitlementBalanceGateway,
+  EntitlementBalanceInput,
+  EntitlementBalanceResult,
   EntitlementSettleGateway,
   EntitlementSettleInput,
   EntitlementSettleResult
@@ -38,7 +41,8 @@ export class MolingClient
     LaunchTicketVerifier,
     EntitlementReserveGateway,
     EntitlementReleaseGateway,
-    EntitlementSettleGateway
+    EntitlementSettleGateway,
+    EntitlementBalanceGateway
 {
   constructor(private readonly config: Pick<AppConfig, "molingApiBaseUrl" | "internalApiToken">) {}
 
@@ -108,6 +112,39 @@ export class MolingClient
       entitlementId: input.entitlementId,
       balancePoints:
         readOptionalDecimalField(source, "balance_points", "balance", "remaining") ?? "0"
+    };
+  }
+
+  async getBalance(input: EntitlementBalanceInput): Promise<EntitlementBalanceResult> {
+    const url = new URL("/api/internal/entitlement-balance", this.config.molingApiBaseUrl);
+    url.searchParams.set("entitlement_id", String(input.entitlementId));
+    url.searchParams.set("user_id", String(input.userId));
+
+    // 余额查询走墨灵内部接口，前端只拿本应用后端整理后的公开字段，不接触内部令牌。
+    const response = await fetch(url, {
+      headers: {
+        "x-internal-token": this.config.internalApiToken
+      }
+    });
+    const payload = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new BillingServiceError("BILLING_BALANCE_LOOKUP_FAILED", "墨灵积分余额查询失败。", 502);
+    }
+
+    let source: Record<string, unknown>;
+    try {
+      source = unwrapDataObject(payload);
+    } catch {
+      // 平台响应格式异常时对外仍归类为余额查询失败，避免把内部协议细节泄露给用户端。
+      throw new BillingServiceError("BILLING_BALANCE_LOOKUP_FAILED", "墨灵积分余额查询失败。", 502);
+    }
+
+    return {
+      entitlementId: input.entitlementId,
+      balancePoints:
+        readOptionalDecimalField(source, "remaining", "balance_points", "balance") ?? "0",
+      usable: readOptionalUsableField(source)
     };
   }
 
@@ -293,6 +330,25 @@ function readOptionalDecimalField(
   }
 
   return undefined;
+}
+
+function readOptionalUsableField(source: Record<string, unknown>): boolean {
+  const usable = source.usable;
+  const status = source.status;
+
+  if (typeof usable === "boolean") {
+    return usable;
+  }
+
+  if (typeof usable === "number") {
+    return usable !== 0;
+  }
+
+  if (typeof usable === "string") {
+    return usable !== "0" && usable.toLowerCase() !== "false";
+  }
+
+  return typeof status === "string" ? status.toLowerCase() === "active" : true;
 }
 
 function coerceNumericHoldId(value: string): number | string {

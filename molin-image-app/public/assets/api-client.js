@@ -19,6 +19,19 @@ export async function estimateBilling(input) {
   });
 }
 
+export async function getBillingBalance() {
+  return await requestJson("/api/billing/balance");
+}
+
+export async function getBillingRecords(page = 1, pageSize = 20) {
+  const query = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize)
+  });
+
+  return await requestJson(`/api/billing/records?${query.toString()}`);
+}
+
 export async function createImageTask(input) {
   return await requestJson("/api/image/tasks", {
     method: "POST",
