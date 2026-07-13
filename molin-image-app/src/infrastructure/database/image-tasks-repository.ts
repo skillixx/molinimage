@@ -238,6 +238,8 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
     pageSize: number;
   }): Promise<{ items: ImageTaskRecord[]; total: number }> {
     const offset = (input.page - 1) * input.pageSize;
+    const limitSql = formatSqlLimit(input.pageSize);
+    const offsetSql = formatSqlLimit(offset);
     const taskTypeWhere = input.taskType === undefined ? "" : "AND task_type = ?";
     const queryParams =
       input.taskType === undefined ? [input.ownerUserId] : [input.ownerUserId, input.taskType];
@@ -289,11 +291,11 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
        FROM image_tasks
        WHERE owner_user_id = ?
         AND status = 'succeeded'
-        AND deleted_at IS NULL
+       AND deleted_at IS NULL
         ${taskTypeWhere}
        ORDER BY is_favorited DESC, created_at DESC
-       LIMIT ? OFFSET ?`,
-      [...queryParams, input.pageSize, offset]
+       LIMIT ${limitSql} OFFSET ${offsetSql}`,
+      queryParams
     );
 
     return {
@@ -419,6 +421,15 @@ function parseJsonArray(value: string | string[] | null): string[] {
   }
 
   return parsed.filter((item): item is string => typeof item === "string");
+}
+
+function formatSqlLimit(value: number): string {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("分页参数必须是非负安全整数。");
+  }
+
+  // MySQL 某些版本对 prepared statement 的 LIMIT/OFFSET 参数兼容性不好；这里仅内联已校验数字。
+  return String(value);
 }
 
 const imageTaskSelectSql = `SELECT

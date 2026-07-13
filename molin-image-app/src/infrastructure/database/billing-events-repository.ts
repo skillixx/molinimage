@@ -392,6 +392,8 @@ export class MySqlBillingEventsRepository implements BillingEventsRepository {
     pageSize: number;
   }): Promise<{ items: BillingEventWithTaskRecord[]; total: number }> {
     const offset = (input.page - 1) * input.pageSize;
+    const limitSql = formatSqlLimit(input.pageSize);
+    const offsetSql = formatSqlLimit(offset);
     const [countRows] = await this.pool.execute<(RowDataPacket & { total: number })[]>(
       `SELECT COUNT(*) AS total
        FROM billing_events
@@ -421,11 +423,11 @@ export class MySqlBillingEventsRepository implements BillingEventsRepository {
        FROM billing_events
        LEFT JOIN image_tasks
         ON image_tasks.id = billing_events.task_id
-        AND image_tasks.owner_user_id = billing_events.owner_user_id
+       AND image_tasks.owner_user_id = billing_events.owner_user_id
        WHERE billing_events.owner_user_id = ?
        ORDER BY billing_events.created_at DESC, billing_events.id DESC
-       LIMIT ? OFFSET ?`,
-      [input.ownerUserId, input.pageSize, offset]
+       LIMIT ${limitSql} OFFSET ${offsetSql}`,
+      [input.ownerUserId]
     );
 
     return {
@@ -457,6 +459,15 @@ export class MySqlBillingEventsRepository implements BillingEventsRepository {
       }
     );
   }
+}
+
+function formatSqlLimit(value: number): string {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("分页参数必须是非负安全整数。");
+  }
+
+  // MySQL 某些版本对 prepared statement 的 LIMIT/OFFSET 参数兼容性不好；这里仅内联已校验数字。
+  return String(value);
 }
 
 const billingEventSelectSql = `SELECT

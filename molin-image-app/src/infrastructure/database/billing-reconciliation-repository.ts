@@ -90,6 +90,8 @@ export class MySqlBillingReconciliationRepository implements BillingReconciliati
     pageSize: number;
   }): Promise<{ items: BillingReconciliationTaskRecord[]; total: number }> {
     const offset = (input.page - 1) * input.pageSize;
+    const limitSql = formatSqlLimit(input.pageSize);
+    const offsetSql = formatSqlLimit(offset);
     const [countRows] = await this.pool.execute<(RowDataPacket & { total: number })[]>(
       `SELECT COUNT(*) AS total
        FROM image_tasks
@@ -101,8 +103,7 @@ export class MySqlBillingReconciliationRepository implements BillingReconciliati
        WHERE image_tasks.status = 'billing_pending'
         OR (image_tasks.status = 'failed' AND image_tasks.error_code = 'BILLING_RELEASE_PENDING')
        ORDER BY image_tasks.updated_at ASC
-       LIMIT ? OFFSET ?`,
-      [input.pageSize, offset]
+       LIMIT ${limitSql} OFFSET ${offsetSql}`
     );
 
     return {
@@ -209,6 +210,15 @@ export class MySqlBillingReconciliationRepository implements BillingReconciliati
 
     return rows;
   }
+}
+
+function formatSqlLimit(value: number): string {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("分页参数必须是非负安全整数。");
+  }
+
+  // MySQL 某些版本对 prepared statement 的 LIMIT/OFFSET 参数兼容性不好；这里仅内联已校验数字。
+  return String(value);
 }
 
 const pendingTaskSelectSql = `SELECT
