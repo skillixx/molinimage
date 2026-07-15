@@ -37,6 +37,11 @@ import { FileService } from "../src/modules/files/file-service.js";
 import { ImageTaskService } from "../src/modules/image-tasks/image-task-service.js";
 import { ImageGenerationWorkerService } from "../src/workers/image-generation-worker-service.js";
 import type {
+  ImageOutputPostProcessInput,
+  ImageOutputPostProcessResult,
+  ImageOutputPostProcessor
+} from "../src/workers/image-output-post-processor.js";
+import type {
   ReleaseBillingRequest,
   ReleaseBillingResult,
   ReserveBillingResult,
@@ -108,6 +113,58 @@ void test("文生图 worker 调用 AI 网关、保存结果文件、写日志并
   assert.equal(aiLogs.records[0]?.task_id, task.id);
   assert.equal(aiLogs.records[0]?.success, true);
   assert.equal(aiLogs.records[0]?.gateway_capability, "image_generation");
+});
+
+void test("文生图 worker 保留模型原始尺寸且不调用图片后处理", async () => {
+  const taskRepository = new InMemoryImageTasksRepository();
+  const fileRepository = new InMemoryFilesRepository();
+  const storage = new FakeStorageService();
+  const aiGateway = new FixedSizeAiGatewayImageGenerationClient(1024, 576);
+  const aiLogs = new InMemoryAiGatewayCallLogsRepository();
+  const fileService = new FileService(fileRepository, storage, {
+    storageProvider: "minio",
+    storageBucket: "molinimage",
+    storagePresignedUrlTtlSeconds: 300
+  });
+  const taskService = new ImageTaskService(taskRepository);
+  const imageOutputPostProcessor = new FakeImageOutputPostProcessor();
+  const worker = new ImageGenerationWorkerService(
+    taskRepository,
+    taskService,
+    fileService,
+    aiGateway,
+    aiLogs,
+    undefined,
+    undefined,
+    undefined,
+    imageOutputPostProcessor
+  );
+  const task = await taskRepository.create({
+    id: "task_text_to_image_size_001",
+    owner_user_id: 479,
+    task_type: "text_to_image",
+    status: "billing_reserved",
+    prompt: "一张横版运营封面",
+    negative_prompt: null,
+    style_preset_id: null,
+    input_file_ids: [],
+    gateway_model_code: "image-gen-default",
+    gateway_capability: "image_generation",
+    quality: "standard",
+    image_size: "896x512",
+    image_count: 1,
+    cost_points: "6",
+    billing_event_id: "billing_size_001",
+    idempotency_key: "task_create_size_001"
+  });
+
+  const result = await worker.processTask(task.id);
+
+  assert.equal(result.task.status, "succeeded");
+  assert.deepEqual(imageOutputPostProcessor.inputs, []);
+  assert.equal(fileRepository.records[0]?.width, 1024);
+  assert.equal(fileRepository.records[0]?.height, 576);
+  assert.deepEqual(storage.uploads[0]?.body, createPngHeader(1024, 576));
 });
 
 void test("图生文 worker 校验输入图归属、调用 vision_text 并保存文本结果", async () => {
@@ -730,6 +787,40 @@ class FakeAiGatewayImageGenerationClient implements AiGatewayImageGenerationClie
       usage: {
         image_count: 1
       }
+    });
+  }
+}
+
+class FixedSizeAiGatewayImageGenerationClient implements AiGatewayImageGenerationClient {
+  constructor(
+    private readonly width: number,
+    private readonly height: number
+  ) {}
+
+  generateImage(): Promise<GenerateImageResult> {
+    return Promise.resolve({
+      request_id: "gateway_fixed_size_request_001",
+      images: [
+        {
+          mime_type: "image/png",
+          content_base64: createPngHeader(this.width, this.height).toString("base64")
+        }
+      ],
+      usage: { image_count: 1 }
+    });
+  }
+}
+
+class FakeImageOutputPostProcessor implements ImageOutputPostProcessor {
+  readonly inputs: ImageOutputPostProcessInput[] = [];
+
+  normalizeToTargetSize(input: ImageOutputPostProcessInput): Promise<ImageOutputPostProcessResult> {
+    this.inputs.push(input);
+    const [width, height] = input.targetSize.split("x").map(Number);
+
+    return Promise.resolve({
+      mimeType: "image/png",
+      contentBase64: createPngHeader(width, height).toString("base64")
     });
   }
 }

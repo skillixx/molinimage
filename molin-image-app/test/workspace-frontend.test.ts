@@ -77,6 +77,7 @@ void test("前端 API 封装只访问应用后端接口", async () => {
 
   assert.match(frontendSource, /\/api\/me/);
   assert.match(frontendSource, /\/api\/image\/models/);
+  assert.match(frontendSource, /\/api\/image\/prompts\/optimize/);
   assert.match(frontendSource, /\/api\/image\/style-presets/);
   assert.match(frontendSource, /\/api\/billing\/estimate/);
   assert.match(frontendSource, /\/api\/image\/tasks/);
@@ -95,7 +96,9 @@ void test("前端 API 封装只访问应用后端接口", async () => {
 void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风格模板体验", async () => {
   const html = await readFile(resolve("public", "index.html"), "utf8");
   const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
+  const modelDisplay = await readFile(resolve("public", "assets", "model-display.js"), "utf8");
   const workbenchModes = await readFile(resolve("public", "assets", "workbench-modes.js"), "utf8");
+  const envExample = await readFile(resolve(".env.example"), "utf8");
   const taskDetailFormat = await readFile(
     resolve("public", "assets", "task-detail-format.js"),
     "utf8"
@@ -104,26 +107,57 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风�
 
   assert.match(html, /预计积分/);
   assert.match(html, /id="imageInput"/);
+  assert.match(html, /id="promptOptimizeButton"/);
   assert.match(html, /id="stylePresetSelect"/);
   assert.match(html, /id="stylePresetList"/);
   assert.match(html, /data-mode="image_to_text"/);
   assert.match(html, /data-mode="upscale"/);
   assert.match(html, /id="upscaleFactorSelect"/);
   assert.match(html, /id="sizeGuide"/);
+  assert.match(html, /模型目录/);
+  assert.doesNotMatch(html, /MODEL CATALOG/);
   assert.match(html, /768x1024/);
   assert.match(html, /1536x1024/);
   assert.doesNotMatch(html, /1792x1024/);
   assert.doesNotMatch(html, /2048x1536/);
   assert.match(workbenchModes, /imageSizeOptions/);
+  assert.match(workbenchModes, /supportsPromptInput: false/);
+  assert.match(workbench, /config\.supportsPromptInput !== true/);
+  assert.match(workbench, /prompt: undefined/);
   assert.match(workbenchModes, /PPT 配图/);
   assert.match(workbenchModes, /横版封面/);
   assert.doesNotMatch(workbenchModes, /1536x2048/);
+  assert.match(workbench, /optimizeCurrentPrompt/);
+  assert.match(workbench, /AI 优化/);
+  assert.match(styles, /compact-button/);
   assert.match(workbench, /renderImageSizeOptions/);
   assert.match(workbench, /renderImageSizeGuide/);
   assert.match(workbench, /尺寸用途说明从统一配置渲染/);
   assert.match(workbench, /supported_image_sizes/);
   assert.match(workbench, /当前模型不支持/);
+  assert.match(workbench, /resolveModelCapabilityLabel/);
+  assert.match(modelDisplay, /图片生成/);
+  assert.match(modelDisplay, /图片编辑/);
+  assert.match(modelDisplay, /图片理解/);
+  assert.match(modelDisplay, /提示词优化/);
+  assert.match(modelDisplay, /内容审核/);
+  assert.match(modelDisplay, /高清放大/);
+  assert.match(modelDisplay, /其他能力/);
+  assert.match(workbench, /resolveModelDisplayName/);
+  assert.doesNotMatch(workbench, /"模型", task\.gateway_model_code/);
+  assert.match(envExample, /"display_name":"通用图片生成"/);
+  assert.match(envExample, /"display_name":"通用图生图"/);
+  assert.match(envExample, /"display_name":"通用图片理解"/);
+  assert.match(envExample, /"display_name":"通用提示词优化"/);
+  assert.match(envExample, /"display_name":"通用内容审核"/);
+  assert.doesNotMatch(envExample, /General Image|Prompt Optimization|Content Moderation/);
   assert.match(html, /id="taskDetailDrawer"/);
+  assert.match(html, /id="annotationEditor"/);
+  assert.match(html, /id="annotationCanvas"/);
+  assert.match(html, /data-annotation-tool="brush"/);
+  assert.match(html, /data-annotation-tool="rectangle"/);
+  assert.match(html, /data-annotation-tool="marker"/);
+  assert.match(html, /id="annotationPrompt"/);
   assert.match(workbench, /state\.estimate\?\.enough_balance === true/);
   assert.match(workbench, /renderProgress\("generating"\)/);
   assert.match(workbench, /navigator\.clipboard\.writeText/);
@@ -136,9 +170,28 @@ void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风�
   assert.match(workbench, /renderStylePresetList/);
   assert.match(workbench, /preset\.preview_image_url/);
   assert.match(workbench, /source_task_id: state\.sourceTaskId/);
+  assert.match(workbench, /state\.annotatedInputFile \?\? elements\.imageInput\.files/);
+  assert.match(workbench, /openAnnotationEditor/);
+  assert.match(workbench, /applyAnnotationForReedit/);
+  assert.match(workbench, /生成结果中不要保留任何标注/);
   assert.match(taskDetailFormat, /resolveTaskFailureMessage/);
   assert.match(styles, /\.style-preset-card/);
   assert.match(styles, /\.size-guide/);
+  assert.match(styles, /\.tool-panel/);
+  assert.match(styles, /\.submit-dock/);
+  assert.match(styles, /\.model-catalog/);
+  assert.match(styles, /\.annotation-editor/);
+  assert.match(styles, /\.annotation-toolbar/);
+  assert.match(html, /class="creation-block creation-block-primary"/);
+  assert.match(html, /class="size-guide-disclosure"/);
+  assert.match(
+    workbench,
+    /elements\.sizeField\.hidden = state\.mode === "image_to_text" \|\| state\.mode === "upscale"/
+  );
+  assert.match(
+    workbench,
+    /elements\.countField\.hidden = state\.mode === "image_to_text" \|\| state\.mode === "upscale"/
+  );
   assert.match(styles, /@media \(max-width: 900px\)/);
 });
 

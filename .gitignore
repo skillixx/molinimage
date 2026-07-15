@@ -5,6 +5,7 @@ molin_docs/
 node_modules/
 dist/
 coverage/
+.playwright-cli/
 
 .env
 .env.local

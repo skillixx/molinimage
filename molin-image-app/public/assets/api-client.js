@@ -19,6 +19,13 @@ export async function estimateBilling(input) {
   });
 }
 
+export async function optimizePrompt(input) {
+  return await requestJson("/api/image/prompts/optimize", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
 export async function getBillingBalance() {
   return await requestJson("/api/billing/balance");
 }

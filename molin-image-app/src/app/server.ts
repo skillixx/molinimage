@@ -8,6 +8,7 @@ import {
   EnvAiGatewayModelCatalogClient,
   HttpAiGatewayImageEditClient,
   HttpAiGatewayImageGenerationClient,
+  HttpAiGatewayPromptOptimizerClient,
   HttpAiGatewayVisionTextClient
 } from "../infrastructure/ai/ai-gateway-client.js";
 import { MySqlAiGatewayCallLogsRepository } from "../infrastructure/database/ai-gateway-call-logs-repository.js";
@@ -33,7 +34,9 @@ import { ImageModelService } from "../modules/image-models/image-model-service.j
 import { ImageTaskService } from "../modules/image-tasks/image-task-service.js";
 import { RiskControlService } from "../modules/risk-control/risk-control-service.js";
 import { StylePresetService } from "../modules/style-presets/style-preset-service.js";
+import { PromptOptimizationService } from "../modules/prompts/prompt-optimization-service.js";
 import { ImageGenerationWorkerService } from "../workers/image-generation-worker-service.js";
+import { SharpImageOutputPostProcessor } from "../workers/image-output-post-processor.js";
 
 const config = loadConfigOrExit();
 const molingClient = new MolingClient(config);
@@ -91,6 +94,12 @@ const billingReconciliationService = new BillingReconciliationService(
 const imageGenerationClient = new HttpAiGatewayImageGenerationClient(config);
 const imageEditClient = new HttpAiGatewayImageEditClient(config);
 const visionTextClient = new HttpAiGatewayVisionTextClient(config);
+const promptOptimizerClient = new HttpAiGatewayPromptOptimizerClient(config);
+const promptOptimizationService = new PromptOptimizationService(
+  imageModelService,
+  promptOptimizerClient
+);
+const imageOutputPostProcessor = new SharpImageOutputPostProcessor();
 const imageGenerationWorkerService = new ImageGenerationWorkerService(
   imageTasksRepository,
   imageTaskService,
@@ -99,7 +108,8 @@ const imageGenerationWorkerService = new ImageGenerationWorkerService(
   aiGatewayCallLogsRepository,
   visionTextClient,
   imageEditClient,
-  stylePresetService
+  stylePresetService,
+  imageOutputPostProcessor
 );
 
 const server = createServer(
@@ -113,6 +123,7 @@ const server = createServer(
     billingReconciliationService,
     pricingRuleService,
     stylePresetService,
+    promptOptimizationService,
     imageGenerationWorkerService
   })
 );

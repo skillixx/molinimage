@@ -466,6 +466,56 @@ void test("失败任务重试接口按当前 session 用户创建 retry task 并
   }
 });
 
+void test("提示词优化接口必须登录，并按当前 session 用户选择模型优化", async () => {
+  const imageTaskService = new FakeImageTaskService();
+  const promptOptimizationService = new FakePromptOptimizationService();
+  const app = await startTestApp(
+    imageTaskService,
+    undefined,
+    undefined,
+    promptOptimizationService
+  );
+
+  try {
+    const unauthorizedResponse = await fetch(`${app.baseUrl}/api/image/prompts/optimize`, {
+      method: "POST",
+      body: JSON.stringify({ prompt: "蓝色杯子" })
+    });
+    const cookie = await createSessionCookie(app.baseUrl);
+    const response = await fetch(`${app.baseUrl}/api/image/prompts/optimize`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie
+      },
+      body: JSON.stringify({
+        prompt: "蓝色杯子",
+        task_type: "text_to_image"
+      })
+    });
+    const body = (await response.json()) as {
+      original_prompt: string;
+      optimized_prompt: string;
+      gateway_model_code: string;
+      request_id: string;
+    };
+
+    assert.equal(unauthorizedResponse.status, 401);
+    assert.equal(response.status, 200);
+    assert.deepEqual(promptOptimizationService.requests[0], {
+      ownerUserId: 479,
+      prompt: "蓝色杯子",
+      taskType: "text_to_image"
+    });
+    assert.equal(body.original_prompt, "蓝色杯子");
+    assert.equal(body.optimized_prompt, "玻璃质感的蓝色杯子，柔和自然光，干净背景。");
+    assert.equal(body.gateway_model_code, "prompt-optimize-default");
+    assert.equal(body.request_id, "prompt_request_api_001");
+  } finally {
+    await app.close();
+  }
+});
+
 class FakeImageTaskService {
   readonly createRequests: CreateImageTaskRequest[] = [];
   readonly getRequests: { ownerUserId: number; taskId: string }[] = [];
@@ -586,6 +636,21 @@ class FakeImageTaskService {
   }
 }
 
+class FakePromptOptimizationService {
+  readonly requests: { ownerUserId: number; prompt: string; taskType?: string | null }[] = [];
+
+  optimizePrompt(request: { ownerUserId: number; prompt: string; taskType?: string | null }) {
+    this.requests.push(request);
+
+    return Promise.resolve({
+      original_prompt: request.prompt,
+      optimized_prompt: "玻璃质感的蓝色杯子，柔和自然光，干净背景。",
+      gateway_model_code: "prompt-optimize-default",
+      request_id: "prompt_request_api_001"
+    });
+  }
+}
+
 class FakeImageGenerationWorkerService {
   readonly taskIds: string[] = [];
 
@@ -672,7 +737,8 @@ class FakeLaunchTicketVerifier implements LaunchTicketVerifier {
 async function startTestApp(
   imageTaskService: FakeImageTaskService,
   imageGenerationWorkerService?: FakeImageGenerationWorkerService,
-  fileService?: FakeFileService
+  fileService?: FakeFileService,
+  promptOptimizationService?: FakePromptOptimizationService
 ): Promise<{
   baseUrl: string;
   close: () => Promise<void>;
@@ -682,7 +748,8 @@ async function startTestApp(
       launchTicketVerifier: new FakeLaunchTicketVerifier(),
       imageTaskService,
       imageGenerationWorkerService,
-      fileService
+      fileService,
+      promptOptimizationService
     })
   );
 

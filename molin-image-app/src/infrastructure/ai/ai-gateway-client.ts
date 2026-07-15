@@ -75,6 +75,22 @@ export interface AiGatewayVisionTextClient {
   analyzeImage(input: AnalyzeImageInput): Promise<AnalyzeImageResult>;
 }
 
+export interface OptimizePromptInput {
+  prompt: string;
+  model: string;
+  taskType?: string | null;
+}
+
+export interface OptimizePromptResult {
+  request_id: string;
+  optimized_prompt: string;
+  usage: Record<string, unknown> | null;
+}
+
+export interface AiGatewayPromptOptimizerClient {
+  optimizePrompt(input: OptimizePromptInput): Promise<OptimizePromptResult>;
+}
+
 export class EnvAiGatewayModelCatalogClient implements AiGatewayModelCatalogClient {
   constructor(private readonly catalogJson: string) {}
 
@@ -100,7 +116,9 @@ export class HttpAiGatewayImageGenerationClient implements AiGatewayImageGenerat
     }
 
     if (isOpenRouterGateway(this.config.aiGatewayBaseUrl)) {
-      return this.generateImageWithOpenRouterChat(input);
+      return OPENROUTER_ASPECT_RATIO_IMAGE_MODELS.has(input.model)
+        ? this.generateImageWithOpenRouterAspectRatioApi(input)
+        : this.generateImageWithGenericOpenRouterApi(input);
     }
 
     const response = await fetch(
@@ -131,30 +149,78 @@ export class HttpAiGatewayImageGenerationClient implements AiGatewayImageGenerat
     return parseGenerateImageResult(payload, response.headers.get("x-request-id"));
   }
 
-  private async generateImageWithOpenRouterChat(
+  private async generateImageWithOpenRouterAspectRatioApi(
     input: GenerateImageInput
   ): Promise<GenerateImageResult> {
-    const response = await fetch(
-      resolveGatewayUrl(this.config.aiGatewayBaseUrl, "chat/completions"),
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.config.aiGatewayApiKey}`
-        },
-        // OpenRouter 的 Gemini 图片模型是 text+image -> text+image，多模态生成需要走 chat/completions。
-        body: JSON.stringify({
-          model: input.model,
-          modalities: ["image", "text"],
-          messages: [
-            {
-              role: "user",
-              content: buildOpenRouterImagePrompt(input)
-            }
-          ]
-        })
+    if (!Number.isSafeInteger(input.count) || input.count < 1) {
+      throw new Error("OpenRouter 图片生成数量必须是正整数。");
+    }
+
+    const aspectRatio = resolveOpenRouterAspectRatio(input.size);
+    const results: GenerateImageResult[] = [];
+
+    // 当前 OpenRouter 图片模型每次只支持 n=1；多图任务逐张请求，避免整个请求被上游拒绝。
+    for (let index = 0; index < input.count; index += 1) {
+      results.push(await this.generateSingleOpenRouterImage(input, aspectRatio));
+    }
+
+    if (results.length === 1) {
+      return results[0];
+    }
+
+    const firstResult = results[0];
+
+    return {
+      request_id: firstResult.request_id,
+      images: results.flatMap((result) => result.images),
+      // 多次上游调用的 request_id 和 usage 一并保留，便于成本核算与问题追踪。
+      usage: {
+        request_count: results.length,
+        requests: results.map((result) => ({
+          request_id: result.request_id,
+          usage: result.usage
+        }))
       }
-    );
+    };
+  }
+
+  private async generateSingleOpenRouterImage(
+    input: GenerateImageInput,
+    aspectRatio: OpenRouterImageAspectRatio
+  ): Promise<GenerateImageResult> {
+    return await this.sendOpenRouterImageRequest({
+      model: input.model,
+      prompt: buildImagePrompt(input),
+      resolution: "1K",
+      aspect_ratio: aspectRatio,
+      n: 1
+    });
+  }
+
+  private async generateImageWithGenericOpenRouterApi(
+    input: GenerateImageInput
+  ): Promise<GenerateImageResult> {
+    // 未声明比例协议能力的模型保留原有参数，避免错误套用 Gemini 图片模型约束。
+    return await this.sendOpenRouterImageRequest({
+      model: input.model,
+      prompt: buildImagePrompt(input),
+      size: input.size,
+      n: input.count,
+      response_format: "b64_json"
+    });
+  }
+
+  private async sendOpenRouterImageRequest(
+    body: Record<string, unknown>
+  ): Promise<GenerateImageResult> {
+    const response = await fetch(resolveGatewayUrl(this.config.aiGatewayBaseUrl, "images"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${this.config.aiGatewayApiKey}`
+      },
+      body: JSON.stringify(body)
+    });
 
     const payload = await response.json().catch(() => ({}));
 
@@ -162,8 +228,55 @@ export class HttpAiGatewayImageGenerationClient implements AiGatewayImageGenerat
       throw new Error(readGatewayErrorMessage(payload));
     }
 
-    return parseOpenRouterChatImageResult(payload, response.headers.get("x-request-id"));
+    return parseGenerateImageResult(payload, response.headers.get("x-request-id"));
   }
+}
+
+const OPENROUTER_ASPECT_RATIO_IMAGE_MODELS = new Set(["google/gemini-3.1-flash-lite-image"]);
+
+const OPENROUTER_IMAGE_ASPECT_RATIOS = [
+  { value: "1:8", ratio: 1 / 8 },
+  { value: "1:4", ratio: 1 / 4 },
+  { value: "9:16", ratio: 9 / 16 },
+  { value: "2:3", ratio: 2 / 3 },
+  { value: "3:4", ratio: 3 / 4 },
+  { value: "4:5", ratio: 4 / 5 },
+  { value: "1:1", ratio: 1 },
+  { value: "5:4", ratio: 5 / 4 },
+  { value: "4:3", ratio: 4 / 3 },
+  { value: "3:2", ratio: 3 / 2 },
+  { value: "16:9", ratio: 16 / 9 },
+  { value: "21:9", ratio: 21 / 9 },
+  { value: "4:1", ratio: 4 },
+  { value: "8:1", ratio: 8 }
+] as const;
+
+type OpenRouterImageAspectRatio = (typeof OPENROUTER_IMAGE_ASPECT_RATIOS)[number]["value"];
+
+function resolveOpenRouterAspectRatio(size: string): OpenRouterImageAspectRatio {
+  const matched = /^(\d+)x(\d+)$/u.exec(size.trim());
+  const width = Number(matched?.[1]);
+  const height = Number(matched?.[2]);
+
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new Error(`OpenRouter 图片尺寸格式无效：${size}`);
+  }
+
+  const targetRatio = width / height;
+  let nearest: (typeof OPENROUTER_IMAGE_ASPECT_RATIOS)[number] = OPENROUTER_IMAGE_ASPECT_RATIOS[0];
+  let nearestDistance = Math.abs(Math.log(targetRatio / nearest.ratio));
+
+  for (const candidate of OPENROUTER_IMAGE_ASPECT_RATIOS.slice(1)) {
+    // 使用对数距离比较横竖比例，避免宽图和竖图因数值尺度不同产生选择偏差。
+    const distance = Math.abs(Math.log(targetRatio / candidate.ratio));
+
+    if (distance < nearestDistance) {
+      nearest = candidate;
+      nearestDistance = distance;
+    }
+  }
+
+  return nearest.value;
 }
 
 export class HttpAiGatewayImageEditClient implements AiGatewayImageEditClient {
@@ -311,6 +424,55 @@ export class HttpAiGatewayVisionTextClient implements AiGatewayVisionTextClient 
   }
 }
 
+export class HttpAiGatewayPromptOptimizerClient implements AiGatewayPromptOptimizerClient {
+  constructor(
+    private readonly config: {
+      aiGatewayBaseUrl: string;
+      aiGatewayApiKey: string;
+    }
+  ) {}
+
+  async optimizePrompt(input: OptimizePromptInput): Promise<OptimizePromptResult> {
+    if (this.config.aiGatewayApiKey.trim().length === 0) {
+      throw new Error("AI_GATEWAY_API_KEY 未配置，不能调用提示词优化模型。");
+    }
+
+    const response = await fetch(
+      resolveGatewayUrl(this.config.aiGatewayBaseUrl, "chat/completions"),
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.config.aiGatewayApiKey}`
+        },
+        // 提示词优化只走服务端 AI 网关，前端不传模型密钥；要求模型只返回优化后的提示词，方便直接回填输入框。
+        body: JSON.stringify({
+          model: input.model,
+          messages: [
+            {
+              role: "system",
+              content:
+                "你是 AI 图片生成提示词优化助手。请把用户的中文短提示词优化为适合图片生成模型的中文提示词，补充主体、场景、构图、光线、材质、风格和画面细节。只返回优化后的提示词，不要解释，不要使用 Markdown。"
+            },
+            {
+              role: "user",
+              content: buildPromptOptimizationInput(input)
+            }
+          ]
+        })
+      }
+    );
+
+    const payload = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      throw new Error(readGatewayErrorMessage(payload));
+    }
+
+    return parseOptimizePromptResult(payload, response.headers.get("x-request-id"));
+  }
+}
+
 function buildImagePrompt(input: GenerateImageInput): string {
   if (input.negativePrompt === undefined || input.negativePrompt === null) {
     return input.prompt;
@@ -325,13 +487,13 @@ function buildImagePrompt(input: GenerateImageInput): string {
   return `${input.prompt}\n\n反向提示词：${negativePrompt}`;
 }
 
-function buildOpenRouterImagePrompt(input: GenerateImageInput): string {
-  const prompt = buildImagePrompt(input);
-  const countText =
-    input.count > 1 ? `请生成 ${String(input.count)} 张彼此有差异的图片。` : "请生成 1 张图片。";
+function buildPromptOptimizationInput(input: OptimizePromptInput): string {
+  const taskTypeText =
+    input.taskType === undefined || input.taskType === null || input.taskType.trim().length === 0
+      ? "通用图片生成"
+      : input.taskType.trim();
 
-  // OpenRouter chat 图片模型没有统一的 size/n 字段，这里把尺寸和数量写入用户消息，让模型按目标规格输出。
-  return `${prompt}\n\n输出要求：${countText}目标尺寸 ${input.size}。请直接返回图片结果。`;
+  return `任务类型：${taskTypeText}\n原始提示词：${input.prompt.trim()}`;
 }
 
 function buildOpenRouterEditPrompt(input: EditImageInput): string {
@@ -342,6 +504,39 @@ function buildOpenRouterEditPrompt(input: EditImageInput): string {
 
   // 图生图/修复/放大共用 image_edit 能力，提示词里保留用户意图、目标尺寸和输出数量。
   return `${input.prompt}\n\n输出要求：${countText}目标尺寸 ${input.size}。请基于上传图片完成编辑，并直接返回图片结果。`;
+}
+
+function parseOptimizePromptResult(
+  payload: unknown,
+  fallbackRequestId: string | null
+): OptimizePromptResult {
+  if (!isRecord(payload)) {
+    throw new Error("AI 网关提示词优化响应格式异常。");
+  }
+
+  const choices = payload.choices;
+
+  if (!Array.isArray(choices) || choices.length === 0 || !isRecord(choices[0])) {
+    throw new Error("AI 网关提示词优化响应缺少文本结果。");
+  }
+
+  const message = choices[0].message;
+  const content = isRecord(message) && typeof message.content === "string" ? message.content : "";
+  const optimizedPrompt = normalizeOptimizedPrompt(content);
+
+  if (optimizedPrompt.length === 0) {
+    throw new Error("AI 网关未返回可用的优化提示词。");
+  }
+
+  return {
+    request_id:
+      readOptionalString(payload, "request_id") ??
+      readOptionalString(payload, "id") ??
+      fallbackRequestId ??
+      `ai_${String(Date.now())}`,
+    optimized_prompt: optimizedPrompt,
+    usage: isRecord(payload.usage) ? payload.usage : null
+  };
 }
 
 function parseGenerateImageResult(
@@ -494,6 +689,15 @@ function parseGeneratedImageUrl(url: string): GeneratedImage {
     mime_type: match[1].toLowerCase(),
     content_base64: match[2]
   };
+}
+
+function normalizeOptimizedPrompt(content: string): string {
+  return content
+    .trim()
+    .replace(/^```[a-z]*\s*/iu, "")
+    .replace(/```$/u, "")
+    .replace(/^["“”']|["“”']$/gu, "")
+    .trim();
 }
 
 function parseAnalyzeImageResult(

@@ -31,6 +31,8 @@ import { ImageTaskServiceError } from "../modules/image-tasks/image-task-service
 import { RiskControlServiceError } from "../modules/risk-control/risk-control-service.js";
 import type { ImageModelService } from "../modules/image-models/image-model-service.js";
 import { ImageModelServiceError } from "../modules/image-models/image-model-service.js";
+import type { PromptOptimizationService } from "../modules/prompts/prompt-optimization-service.js";
+import { PromptOptimizationServiceError } from "../modules/prompts/prompt-optimization-service.js";
 import {
   MolingTicketError,
   type LaunchTicketVerifier
@@ -80,6 +82,7 @@ export interface AppDependencies {
     StylePresetService,
     "createPreset" | "listManagedPresets" | "listVisiblePresets" | "updatePreset"
   >;
+  promptOptimizationService?: Pick<PromptOptimizationService, "optimizePrompt">;
   imageGenerationWorkerService?: Pick<ImageGenerationWorkerService, "processTask">;
 }
 
@@ -371,6 +374,33 @@ async function handleRequest(
     }
 
     await handleImageModels(response, requestId, session.user_id, dependencies.imageModelService);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/image/prompts/optimize") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (dependencies.promptOptimizationService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "PROMPT_OPTIMIZATION_SERVICE_UNAVAILABLE",
+        "提示词优化服务暂不可用。"
+      );
+      return;
+    }
+
+    await handlePromptOptimize(
+      request,
+      response,
+      requestId,
+      session.user_id,
+      dependencies.promptOptimizationService
+    );
     return;
   }
 
@@ -1532,6 +1562,28 @@ async function handleImageModels(
   }
 }
 
+async function handlePromptOptimize(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  ownerUserId: number,
+  promptOptimizationService: Pick<PromptOptimizationService, "optimizePrompt">
+): Promise<void> {
+  try {
+    const body = await readJsonBody(request);
+    const result = await promptOptimizationService.optimizePrompt({
+      ownerUserId,
+      prompt: readStringField(body, "prompt"),
+      taskType: readOptionalStringField(body, "task_type")
+    });
+
+    writeJson(response, 200, result);
+  } catch (error: unknown) {
+    void requestId;
+    writePublicError(response, requestId, error);
+  }
+}
+
 async function handleAdminImageModels(
   request: IncomingMessage,
   response: ServerResponse,
@@ -1949,6 +2001,11 @@ function writePublicError(response: ServerResponse, requestId: string, error: un
   }
 
   if (error instanceof ImageModelServiceError) {
+    writeError(response, error.statusCode, requestId, error.code, error.message);
+    return;
+  }
+
+  if (error instanceof PromptOptimizationServiceError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
     return;
   }

@@ -9,13 +9,16 @@ import {
   getImageModels,
   getStylePresets,
   retryImageTask,
+  optimizePrompt,
   uploadImageFile
 } from "./api-client.js";
+import { createImageAnnotationEditor } from "./image-annotation-editor.js";
 import {
   formatTaskPoints,
   formatTaskStatus,
   resolveTaskFailureMessage
 } from "./task-detail-format.js";
+import { resolveModelCapabilityLabel, resolveModelDisplayName } from "./model-display.js";
 import { hasStylePresetSupport, imageSizeOptions, modeConfig } from "./workbench-modes.js";
 
 const state = {
@@ -27,7 +30,12 @@ const state = {
   isSubmitting: false,
   referenceFileId: null,
   referencePreviewUrl: null,
-  sourceTaskId: null
+  sourceTaskId: null,
+  annotatedInputFile: null,
+  annotatedPreviewUrl: null,
+  annotationSourceTask: null,
+  annotationSourceFile: null,
+  isOptimizingPrompt: false
 };
 
 const elements = {
@@ -39,6 +47,7 @@ const elements = {
   modeEyebrow: document.querySelector("#modeEyebrow"),
   modeTitle: document.querySelector("#modeTitle"),
   promptField: document.querySelector("#promptField"),
+  promptOptimizeButton: document.querySelector("#promptOptimizeButton"),
   promptInput: document.querySelector("#promptInput"),
   imageUploadField: document.querySelector("#imageUploadField"),
   imageInput: document.querySelector("#imageInput"),
@@ -74,8 +83,24 @@ const elements = {
   taskDetailBackdrop: document.querySelector("#taskDetailBackdrop"),
   taskDetailDrawer: document.querySelector("#taskDetailDrawer"),
   taskDetailClose: document.querySelector("#taskDetailClose"),
-  taskDetailContent: document.querySelector("#taskDetailContent")
+  taskDetailContent: document.querySelector("#taskDetailContent"),
+  annotationBackdrop: document.querySelector("#annotationBackdrop"),
+  annotationEditor: document.querySelector("#annotationEditor"),
+  annotationClose: document.querySelector("#annotationClose"),
+  annotationCancel: document.querySelector("#annotationCancel"),
+  annotationApply: document.querySelector("#annotationApply"),
+  annotationCanvas: document.querySelector("#annotationCanvas"),
+  annotationLoading: document.querySelector("#annotationLoading"),
+  annotationPrompt: document.querySelector("#annotationPrompt"),
+  annotationError: document.querySelector("#annotationError"),
+  annotationColor: document.querySelector("#annotationColor"),
+  annotationWidth: document.querySelector("#annotationWidth"),
+  annotationUndo: document.querySelector("#annotationUndo"),
+  annotationReset: document.querySelector("#annotationReset"),
+  annotationTools: Array.from(document.querySelectorAll("[data-annotation-tool]"))
 };
+
+const annotationEditor = createImageAnnotationEditor(elements.annotationCanvas);
 
 elements.refreshButton.addEventListener("click", () => {
   void bootstrapWorkbench();
@@ -108,6 +133,9 @@ elements.restoreTypeSelect.addEventListener("change", () => {
 elements.primaryAction.addEventListener("click", () => {
   void submitCurrentTask();
 });
+elements.promptOptimizeButton.addEventListener("click", () => {
+  void optimizeCurrentPrompt();
+});
 elements.imageInput.addEventListener("change", () => {
   // 用户重新选择本地图片时，清掉“再次编辑”带来的历史关系，避免一次提交混用两个输入来源。
   clearReeditSource();
@@ -115,7 +143,47 @@ elements.imageInput.addEventListener("change", () => {
 });
 elements.taskDetailClose.addEventListener("click", closeTaskDetail);
 elements.taskDetailBackdrop.addEventListener("click", closeTaskDetail);
+elements.annotationClose.addEventListener("click", closeAnnotationEditor);
+elements.annotationCancel.addEventListener("click", closeAnnotationEditor);
+elements.annotationBackdrop.addEventListener("click", closeAnnotationEditor);
+elements.annotationApply.addEventListener("click", () => {
+  void applyAnnotationForReedit();
+});
+elements.annotationColor.addEventListener("input", () => {
+  annotationEditor.setColor(elements.annotationColor.value);
+});
+elements.annotationWidth.addEventListener("input", () => {
+  annotationEditor.setWidth(elements.annotationWidth.value);
+});
+elements.annotationUndo.addEventListener("click", () => {
+  annotationEditor.undo();
+});
+elements.annotationReset.addEventListener("click", () => {
+  annotationEditor.reset();
+});
+
+for (const tool of elements.annotationTools) {
+  tool.addEventListener("click", () => {
+    const nextTool = tool.dataset.annotationTool;
+
+    if (nextTool === undefined) {
+      return;
+    }
+
+    annotationEditor.setTool(nextTool);
+
+    for (const candidate of elements.annotationTools) {
+      candidate.classList.toggle("is-active", candidate === tool);
+    }
+  });
+}
+
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !elements.annotationEditor.hidden) {
+    closeAnnotationEditor();
+    return;
+  }
+
   if (event.key === "Escape" && !elements.taskDetailDrawer.hidden) {
     closeTaskDetail();
   }
@@ -208,22 +276,30 @@ function renderMode() {
   elements.modeTitle.textContent = config.title;
   elements.promptInput.placeholder = config.placeholder;
   elements.imageUploadField.hidden = !config.requiresUpload;
-  elements.promptField.hidden = state.mode === "upscale";
+  elements.promptField.hidden = config.supportsPromptInput !== true;
+  elements.promptOptimizeButton.hidden = config.supportsPromptInput !== true;
   elements.editModeField.hidden = state.mode !== "image_to_image";
   elements.restoreTypeField.hidden = state.mode !== "image_restore";
   elements.stylePresetField.hidden = state.mode !== "text_to_image";
   elements.stylePresetList.hidden = !hasStylePresetSupport(state.mode);
   elements.upscaleFactorField.hidden = state.mode !== "upscale";
-  elements.sizeField.hidden = state.mode === "upscale";
+  // 图生文由输入图决定内容，高清放大由倍率决定输出，两种模式都不展示无效的尺寸选项。
+  elements.sizeField.hidden = state.mode === "image_to_text" || state.mode === "upscale";
   elements.sizeGuide.hidden = state.mode === "image_to_text" || state.mode === "upscale";
   elements.qualityField.hidden = state.mode === "image_to_text" || state.mode === "upscale";
-  elements.countField.hidden = state.mode === "upscale";
+  // 图生文和高清放大当前都固定单结果，隐藏数量控件避免用户误以为可以批量提交。
+  elements.countField.hidden = state.mode === "image_to_text" || state.mode === "upscale";
   elements.sizeSelect.disabled = state.mode === "image_to_text";
   elements.countSelect.disabled = state.mode === "image_to_text";
   renderUploadHint();
 
   if (state.mode === "image_to_text" || state.mode === "upscale") {
     elements.countSelect.value = "1";
+  }
+
+  if (config.supportsPromptInput !== true) {
+    // 不需要用户提示词的模式要清空隐藏输入，避免从其他模式切换过来时提交旧提示词。
+    elements.promptInput.value = "";
   }
 
   elements.actionHint.textContent =
@@ -298,6 +374,39 @@ async function handleTaskSubmitError(error, fallbackMessage) {
   }
 
   showError(error instanceof Error ? error.message : fallbackMessage);
+}
+
+async function optimizeCurrentPrompt() {
+  clearError();
+
+  const prompt = elements.promptInput.value.trim();
+
+  if (prompt.length === 0) {
+    showError("请输入需要优化的提示词。");
+    return;
+  }
+
+  state.isOptimizingPrompt = true;
+  elements.promptOptimizeButton.disabled = true;
+  elements.promptOptimizeButton.textContent = "优化中";
+  elements.actionHint.textContent = "正在调用 AI 优化提示词";
+
+  try {
+    const result = await optimizePrompt({
+      prompt,
+      task_type: state.mode
+    });
+
+    elements.promptInput.value = result.optimized_prompt;
+    elements.actionHint.textContent = "提示词已优化，可继续调整后创建任务";
+    await refreshEstimate();
+  } catch (error) {
+    showError(error instanceof Error ? error.message : "提示词优化失败，请稍后重试。");
+  } finally {
+    state.isOptimizingPrompt = false;
+    elements.promptOptimizeButton.disabled = false;
+    elements.promptOptimizeButton.textContent = "AI 优化";
+  }
 }
 
 async function submitCurrentTask() {
@@ -402,7 +511,7 @@ async function submitImageToTextTask() {
     const result = await createImageTask({
       ...currentPricingExpectation(),
       task_type: "image_to_text",
-      prompt: elements.promptInput.value.trim(),
+      prompt: undefined,
       input_file_ids: [uploaded.file.id],
       gateway_model_code: modelCode,
       gateway_capability: "vision_text",
@@ -425,7 +534,8 @@ async function submitImageToImageTask() {
 
   const prompt = elements.promptInput.value.trim();
   const modelCode = elements.modelSelect.value;
-  const file = elements.imageInput.files?.[0];
+  // 标注画布导出的 PNG 优先于本地选择文件，确保模型收到用户实际标记过的参考图。
+  const file = state.annotatedInputFile ?? elements.imageInput.files?.[0];
 
   if (modelCode.length === 0) {
     showError("当前模式暂无可用模型。");
@@ -625,6 +735,7 @@ function currentPricingExpectation() {
 function setSubmitting(isSubmitting, message = "") {
   state.isSubmitting = isSubmitting;
   elements.primaryAction.textContent = isSubmitting ? "生成中" : "创建任务";
+  elements.promptOptimizeButton.disabled = isSubmitting || state.isOptimizingPrompt;
   elements.actionHint.textContent = isSubmitting ? message : elements.actionHint.textContent;
   updatePrimaryActionState();
 }
@@ -705,7 +816,7 @@ function createImageResultCard(file, task) {
   continueButton.className = "ghost-button copy-button";
   continueButton.textContent = "再次编辑";
   continueButton.addEventListener("click", () => {
-    useTaskForReedit(task, file);
+    void openAnnotationEditor(task, file);
   });
 
   dimensions.className = "result-dimensions";
@@ -976,8 +1087,13 @@ function renderImageSizeOptions() {
 
 function renderImageSizeGuide() {
   elements.sizeGuide.replaceChildren();
+  const disclosure = elements.sizeGuide.closest(".size-guide-disclosure");
+  const shouldHide = state.mode === "image_to_text" || state.mode === "upscale";
 
-  if (state.mode === "image_to_text" || state.mode === "upscale") {
+  // 图生文和高清放大不需要选择输出尺寸，同时隐藏尺寸参考，避免出现空白操作区。
+  disclosure?.toggleAttribute("hidden", shouldHide);
+
+  if (shouldHide) {
     return;
   }
 
@@ -1130,7 +1246,7 @@ function renderModelList(modelCatalog) {
       <small></small>
     `;
     item.querySelector("strong").textContent = model.display_name;
-    item.querySelector("span").textContent = model.capability;
+    item.querySelector("span").textContent = resolveModelCapabilityLabel(model.capability);
     item.querySelector("small").textContent = model.description;
     elements.modelList.append(item);
   }
@@ -1207,7 +1323,7 @@ function renderHistory(items) {
         reeditButton.className = "ghost-button history-reedit-button";
         reeditButton.textContent = "再次编辑";
         reeditButton.addEventListener("click", () => {
-          useTaskForReedit(task, file);
+          void openAnnotationEditor(task, file);
         });
         imageItem.append(link, reeditButton);
         imageGrid.append(imageItem);
@@ -1340,7 +1456,16 @@ function renderTaskDetail(detail) {
   appendDetailValue(parameterGrid, "提示词", task.prompt ?? "未填写", true);
   appendDetailValue(parameterGrid, "反向提示词", task.negative_prompt ?? "未填写", true);
   appendDetailValue(parameterGrid, "风格 / 操作", task.style_preset_id ?? "默认");
-  appendDetailValue(parameterGrid, "模型", task.gateway_model_code ?? "未记录");
+  appendDetailValue(
+    parameterGrid,
+    "模型",
+    resolveModelDisplayName(
+      state.models,
+      task.gateway_model_code,
+      task.gateway_capability,
+      task.task_type
+    )
+  );
   appendDetailValue(parameterGrid, "质量档位", task.quality ?? "默认");
   appendDetailValue(parameterGrid, "尺寸", task.image_size ?? "由原图决定");
   appendDetailValue(parameterGrid, "数量", String(task.image_count));
@@ -1526,6 +1651,13 @@ function setModelHealth(text, tone) {
 }
 
 function renderUploadHint() {
+  if (state.annotatedInputFile !== null && state.mode === "image_to_image") {
+    elements.uploadHint.textContent = `已带入标注图 ${state.annotatedInputFile.name}，重新选择文件将取消标注。`;
+    elements.referencePreview.hidden = false;
+    elements.referencePreviewImage.src = state.annotatedPreviewUrl ?? "";
+    return;
+  }
+
   if (state.referenceFileId !== null && state.mode === "image_to_image") {
     elements.uploadHint.textContent = `已从任务 ${state.sourceTaskId ?? "未知"} 自动带入结果图。`;
     elements.referencePreview.hidden = false;
@@ -1538,14 +1670,92 @@ function renderUploadHint() {
   elements.referencePreviewImage.removeAttribute("src");
 }
 
-function useTaskForReedit(task, file) {
+async function openAnnotationEditor(task, file) {
+  clearAnnotationError();
+  state.annotationSourceTask = task;
+  state.annotationSourceFile = file;
+  elements.annotationPrompt.value = task.prompt ?? "";
+  elements.annotationLoading.hidden = false;
+  elements.annotationApply.disabled = true;
+  elements.annotationBackdrop.hidden = false;
+  elements.annotationEditor.hidden = false;
+  document.body.classList.add("is-annotation-open");
+  elements.annotationClose.focus();
+
+  try {
+    // 通过受权限保护的预览地址读取图片，画布不会绕过后端访问对象存储。
+    await annotationEditor.loadImage(file.preview_url);
+    elements.annotationLoading.hidden = true;
+    elements.annotationApply.disabled = false;
+  } catch (error) {
+    showAnnotationError(error instanceof Error ? error.message : "标注画布加载失败。");
+  }
+}
+
+function closeAnnotationEditor() {
+  elements.annotationBackdrop.hidden = true;
+  elements.annotationEditor.hidden = true;
+  document.body.classList.remove("is-annotation-open");
+  state.annotationSourceTask = null;
+  state.annotationSourceFile = null;
+  clearAnnotationError();
+}
+
+async function applyAnnotationForReedit() {
+  clearAnnotationError();
+  const task = state.annotationSourceTask;
+  const file = state.annotationSourceFile;
+  const description = elements.annotationPrompt.value.trim();
+
+  if (task === null || file === null) {
+    showAnnotationError("来源作品已失效，请关闭画布后重新选择再次编辑。");
+    return;
+  }
+
+  if (!annotationEditor.hasAnnotations()) {
+    showAnnotationError("请先在图片上添加画笔、方框或编号标注。");
+    return;
+  }
+
+  if (description.length === 0) {
+    showAnnotationError("请填写修改说明，让模型理解每个标注区域的修改目标。");
+    elements.annotationPrompt.focus();
+    return;
+  }
+
+  elements.annotationApply.disabled = true;
+  elements.annotationApply.textContent = "正在生成标注图";
+
+  try {
+    const blob = await annotationEditor.exportPngBlob();
+
+    clearAnnotatedInputFile();
+    state.annotatedInputFile = new File([blob], `annotation-${task.id}-${String(Date.now())}.png`, {
+      type: "image/png"
+    });
+    state.annotatedPreviewUrl = URL.createObjectURL(blob);
+
+    // 明确告诉模型标注仅用于定位，避免把线条、方框和编号绘制到最终成品中。
+    const annotationPrompt = `请根据参考图中的彩色标注编辑图片：${description}。彩色线条、方框和编号仅用于定位，生成结果中不要保留任何标注。`;
+
+    prepareReeditTask(task, file, annotationPrompt);
+    closeAnnotationEditor();
+  } catch (error) {
+    showAnnotationError(error instanceof Error ? error.message : "标注图片导出失败，请重试。");
+  } finally {
+    elements.annotationApply.disabled = false;
+    elements.annotationApply.textContent = "使用标注继续编辑";
+  }
+}
+
+function prepareReeditTask(task, file, prompt) {
   state.mode = "image_to_image";
   state.referenceFileId = file.file.id;
   state.referencePreviewUrl = file.preview_url;
   state.sourceTaskId = task.id;
   elements.imageInput.value = "";
   elements.resultList.replaceChildren();
-  elements.promptInput.value = task.prompt ?? "";
+  elements.promptInput.value = prompt;
   renderMode();
   renderModelOptions();
   renderStylePresetOptions();
@@ -1561,8 +1771,18 @@ function useTaskForReedit(task, file) {
   renderProgress("idle");
   void refreshEstimate();
   void refreshHistory();
-  elements.actionHint.textContent = `已回填任务 ${task.id} 的参数，可继续调整后创建新任务`;
+  elements.actionHint.textContent = `任务 ${task.id} 的标注图和修改说明已带入，可确认参数后创建新任务`;
   elements.promptInput.focus();
+}
+
+function showAnnotationError(message) {
+  elements.annotationError.textContent = message;
+  elements.annotationError.hidden = false;
+}
+
+function clearAnnotationError() {
+  elements.annotationError.textContent = "";
+  elements.annotationError.hidden = true;
 }
 
 function setSelectValueIfAvailable(select, value) {
@@ -1578,9 +1798,19 @@ function setSelectValueIfAvailable(select, value) {
 }
 
 function clearReeditSource() {
+  clearAnnotatedInputFile();
   state.referenceFileId = null;
   state.referencePreviewUrl = null;
   state.sourceTaskId = null;
+}
+
+function clearAnnotatedInputFile() {
+  if (state.annotatedPreviewUrl !== null) {
+    URL.revokeObjectURL(state.annotatedPreviewUrl);
+  }
+
+  state.annotatedInputFile = null;
+  state.annotatedPreviewUrl = null;
 }
 
 function showError(message) {

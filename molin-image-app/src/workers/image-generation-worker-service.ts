@@ -27,6 +27,10 @@ import {
   buildVisionTextPrompt,
   resolveUpscaleTargetDimension
 } from "./image-mode-prompts.js";
+import {
+  NoopImageOutputPostProcessor,
+  type ImageOutputPostProcessor
+} from "./image-output-post-processor.js";
 
 export interface ProcessImageTaskResult {
   task: PublicImageTask;
@@ -48,7 +52,8 @@ export class ImageGenerationWorkerService {
     private readonly aiGatewayLogsRepository: AiGatewayCallLogsRepository,
     private readonly visionTextClient?: AiGatewayVisionTextClient,
     private readonly imageEditClient?: AiGatewayImageEditClient,
-    private readonly stylePresetResolver?: WorkerStylePresetResolver
+    private readonly stylePresetResolver?: WorkerStylePresetResolver,
+    private readonly imageOutputPostProcessor: ImageOutputPostProcessor = new NoopImageOutputPostProcessor()
   ) {}
 
   async processTask(taskId: string): Promise<ProcessImageTaskResult> {
@@ -110,6 +115,7 @@ export class ImageGenerationWorkerService {
 
       for (let index = 0; index < generated.images.length; index += 1) {
         const image = generated.images[index];
+        // 文生图已由模型按目标宽高比完成构图，直接保存原图，避免 cover 裁切丢失主体或文字。
         const uploaded = await this.fileService.uploadFile({
           ownerUserId: task.owner_user_id,
           fileName: `${task.id}_${String(index + 1)}.png`,
@@ -305,11 +311,12 @@ export class ImageGenerationWorkerService {
 
       for (let index = 0; index < edited.images.length; index += 1) {
         const image = edited.images[index];
+        const normalizedImage = await this.normalizeOutputImage(image, editRequest.size);
         const uploaded = await this.fileService.uploadFile({
           ownerUserId: task.owner_user_id,
           fileName: `${task.id}_${options.outputFileLabel}_${String(index + 1)}.png`,
-          mimeType: image.mime_type,
-          contentBase64: image.content_base64,
+          mimeType: normalizedImage.mime_type,
+          contentBase64: normalizedImage.content_base64,
           fileType: "output",
           generatedAsset: options.operation === "upscale",
           expectedWidth: editRequest.expectedWidth,
@@ -477,6 +484,22 @@ export class ImageGenerationWorkerService {
       errorCode: code,
       errorMessage: message
     });
+  }
+
+  private async normalizeOutputImage(
+    image: { mime_type: string; content_base64: string },
+    targetSize: string
+  ): Promise<{ mime_type: string; content_base64: string }> {
+    const normalized = await this.imageOutputPostProcessor.normalizeToTargetSize({
+      mimeType: image.mime_type,
+      contentBase64: image.content_base64,
+      targetSize
+    });
+
+    return {
+      mime_type: normalized.mimeType,
+      content_base64: normalized.contentBase64
+    };
   }
 
   private async buildTextToImagePrompt(task: ImageTaskRecord): Promise<string> {
