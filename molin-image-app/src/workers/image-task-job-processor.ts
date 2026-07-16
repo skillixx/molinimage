@@ -32,6 +32,23 @@ export interface ClaimedImageTaskProcessor {
 export interface ImageTaskJobAttemptContext {
   attemptNumber: number;
   maxAttempts: number;
+  requestId?: string;
+  jobId?: string;
+}
+
+export interface ImageTaskExecutionMetrics {
+  request_id: string;
+  task_id: string;
+  job_id: string;
+  outcome: "processed" | "skipped" | "retrying" | "failed";
+  attempt_number: number;
+  queue_wait_ms: number;
+  execution_ms: number;
+  end_to_end_ms: number;
+}
+
+export interface ImageTaskExecutionMetricsLogger {
+  record(metrics: ImageTaskExecutionMetrics): void;
 }
 
 export interface ImageTaskFinalFailureHandler {
@@ -77,7 +94,8 @@ export class ImageTaskJobProcessor {
     private readonly repository: ImageTaskExecutionRepository,
     private readonly workerService: ClaimedImageTaskProcessor,
     private readonly options: ImageTaskJobProcessorOptions,
-    private readonly finalFailureHandler?: ImageTaskFinalFailureHandler
+    private readonly finalFailureHandler?: ImageTaskFinalFailureHandler,
+    private readonly metricsLogger?: ImageTaskExecutionMetricsLogger
   ) {
     this.lockDurationMs = options.lockDurationMs ?? Math.max(options.jobTimeoutMs * 2, 30_000);
     this.heartbeatIntervalMs =
@@ -90,6 +108,9 @@ export class ImageTaskJobProcessor {
     attemptContext: ImageTaskJobAttemptContext = { attemptNumber: 1, maxAttempts: 3 }
   ): Promise<ImageTaskJobProcessOutcome> {
     const taskId = normalizeTaskId(jobData.task_id);
+    const executionStartedAt = Date.now();
+    const requestId = attemptContext.requestId ?? `worker_${randomUUID().replaceAll("-", "")}`;
+    const jobId = attemptContext.jobId ?? taskId;
     const lockToken = randomUUID().replaceAll("-", "");
     const claim = await this.repository.claimExecution({
       taskId,
@@ -99,6 +120,15 @@ export class ImageTaskJobProcessor {
 
     if (claim === undefined) {
       // 终态任务或仍被其他 Worker 持有的任务视为幂等跳过，不再次调用模型或修改计费。
+      this.recordMetrics({
+        requestId,
+        taskId,
+        jobId,
+        attemptNumber: attemptContext.attemptNumber,
+        executionStartedAt,
+        taskCreatedAt: executionStartedAt,
+        outcome: "skipped"
+      });
       return "skipped";
     }
 
@@ -158,6 +188,16 @@ export class ImageTaskJobProcessor {
 
     try {
       await Promise.race([processing, interruption]);
+      this.recordMetrics({
+        requestId,
+        taskId,
+        jobId,
+        attemptNumber: attemptContext.attemptNumber,
+        executionStartedAt,
+        taskCreatedAt: parseTaskTimestamp(claim.task.created_at, executionStartedAt),
+        workerStartedAt: parseTaskTimestamp(claim.task.worker_started_at, executionStartedAt),
+        outcome: "processed"
+      });
       return "processed";
     } catch (error: unknown) {
       if (!abortController.signal.aborted) {
@@ -170,23 +210,77 @@ export class ImageTaskJobProcessor {
 
       if (shouldFinalize && this.finalFailureHandler !== undefined) {
         // 只有不可重试或次数耗尽时才进入业务终态；该路径会由 ImageTaskService 幂等释放预占积分。
-        await this.finalFailureHandler.finalizeFailure({
-          task: claim.task,
-          workerLockToken: lockToken,
-          errorCode: processingError.code,
-          errorMessage: processingError.message
-        });
+        try {
+          await this.finalFailureHandler.finalizeFailure({
+            task: claim.task,
+            workerLockToken: lockToken,
+            errorCode: processingError.code,
+            errorMessage: processingError.message
+          });
+        } finally {
+          this.recordMetrics({
+            requestId,
+            taskId,
+            jobId,
+            attemptNumber: attemptContext.attemptNumber,
+            executionStartedAt,
+            taskCreatedAt: parseTaskTimestamp(claim.task.created_at, executionStartedAt),
+            workerStartedAt: parseTaskTimestamp(claim.task.worker_started_at, executionStartedAt),
+            outcome: "failed"
+          });
+        }
         void processing.catch(() => undefined);
         throw new ImageTaskJobFinalFailureError(processingError.code, !processingError.retryable);
       }
 
       // 中间失败只归还数据库租约，绝不能提前把任务标记失败或释放积分。
       await this.repository.releaseExecution({ taskId, lockToken }).catch(() => false);
+      this.recordMetrics({
+        requestId,
+        taskId,
+        jobId,
+        attemptNumber: attemptContext.attemptNumber,
+        executionStartedAt,
+        taskCreatedAt: parseTaskTimestamp(claim.task.created_at, executionStartedAt),
+        workerStartedAt: parseTaskTimestamp(claim.task.worker_started_at, executionStartedAt),
+        outcome: "retrying"
+      });
       void processing.catch(() => undefined);
       throw toPublicProcessingError(error);
     } finally {
       clearInterval(heartbeat);
       clearTimeout(timeout);
+    }
+  }
+
+  private recordMetrics(input: {
+    requestId: string;
+    taskId: string;
+    jobId: string;
+    attemptNumber: number;
+    executionStartedAt: number;
+    taskCreatedAt: number;
+    workerStartedAt?: number;
+    outcome: ImageTaskExecutionMetrics["outcome"];
+  }): void {
+    const completedAt = Date.now();
+
+    try {
+      this.metricsLogger?.record({
+        request_id: input.requestId,
+        task_id: input.taskId,
+        job_id: input.jobId,
+        outcome: input.outcome,
+        attempt_number: input.attemptNumber,
+        queue_wait_ms: Math.max(
+          0,
+          (input.workerStartedAt ?? input.executionStartedAt) - input.taskCreatedAt
+        ),
+        execution_ms: Math.max(0, completedAt - input.executionStartedAt),
+        end_to_end_ms: Math.max(0, completedAt - input.taskCreatedAt)
+      });
+    } catch {
+      // 可观测性是旁路能力，日志后端异常不能触发任务重试、状态回滚或重复计费。
     }
   }
 }
@@ -244,4 +338,13 @@ function toPublicProcessingError(error: unknown): Error {
 
   // BullMQ 失败原因只保留稳定中文信息，不能把 Provider、Redis 或数据库原始异常写进队列。
   return new Error("图片任务执行异常，等待队列重试。");
+}
+
+function parseTaskTimestamp(value: string | null | undefined, fallback: number): number {
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : fallback;
 }

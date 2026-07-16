@@ -12,7 +12,8 @@ import {
   ImageTaskJobFinalFailureError,
   ImageTaskJobTimeoutError,
   type ClaimedImageTaskProcessor,
-  type ImageTaskExecutionRepository
+  type ImageTaskExecutionRepository,
+  type ImageTaskExecutionMetrics
 } from "../src/workers/image-task-job-processor.js";
 import { ImageTaskProcessingError } from "../src/workers/image-task-processing-error.js";
 
@@ -311,6 +312,66 @@ void test("两个 Worker 重复投递最终失败任务只触发一次释放处�
   assert.equal(releaseCalls, 1);
 });
 
+void test("Worker 记录任务排队、执行和端到端耗时且只包含安全关联字段", async () => {
+  const repository = new InMemoryExecutionRepository("queued");
+  const metrics: ImageTaskExecutionMetrics[] = [];
+  const processor = new ImageTaskJobProcessor(
+    repository,
+    {
+      processTask(): Promise<void> {
+        repository.status = "succeeded";
+        return Promise.resolve();
+      }
+    },
+    { jobTimeoutMs: 500, lockDurationMs: 200, heartbeatIntervalMs: 50 },
+    undefined,
+    { record: (metric) => metrics.push(metric) }
+  );
+
+  await processor.process(
+    { task_id: "task_metrics" },
+    {
+      attemptNumber: 1,
+      maxAttempts: 3,
+      requestId: "request_metrics_001",
+      jobId: "job_metrics_001"
+    }
+  );
+
+  assert.equal(metrics.length, 1);
+  assert.equal(metrics[0]?.request_id, "request_metrics_001");
+  assert.equal(metrics[0]?.task_id, "task_metrics");
+  assert.equal(metrics[0]?.job_id, "job_metrics_001");
+  assert.equal(metrics[0]?.outcome, "processed");
+  assert.equal(metrics[0]?.queue_wait_ms, 500);
+  assert.equal((metrics[0]?.execution_ms ?? -1) >= 0, true);
+  assert.equal((metrics[0]?.end_to_end_ms ?? -1) >= 0, true);
+  assert.doesNotMatch(JSON.stringify(metrics), /测试图片|prompt|token|image_content/iu);
+});
+
+void test("监控日志写入失败不影响任务成功结果", async () => {
+  const repository = new InMemoryExecutionRepository("queued");
+  const processor = new ImageTaskJobProcessor(
+    repository,
+    {
+      processTask(): Promise<void> {
+        repository.status = "succeeded";
+        return Promise.resolve();
+      }
+    },
+    { jobTimeoutMs: 500, lockDurationMs: 200, heartbeatIntervalMs: 50 },
+    undefined,
+    {
+      record(): void {
+        throw new Error("模拟日志输出失败");
+      }
+    }
+  );
+
+  assert.equal(await processor.process({ task_id: "task_metrics_failure" }), "processed");
+  assert.equal(repository.status, "succeeded");
+});
+
 class InMemoryExecutionRepository implements ImageTaskExecutionRepository {
   claimCount = 0;
   renewCount = 0;
@@ -409,6 +470,7 @@ function createTask(id: string, status: ImageTaskStatus): ImageTaskRecord {
     idempotency_key: `idem_${id}`,
     error_code: null,
     error_message: null,
+    worker_started_at: "2026-07-16T00:00:00.500Z",
     is_favorited: false,
     deleted_at: null,
     created_at: "2026-07-16T00:00:00.000Z",

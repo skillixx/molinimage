@@ -76,4 +76,13 @@ export class MinioStorageService implements StorageService {
       input.expiresInSeconds
     );
   }
+
+  async checkHealth(): Promise<void> {
+    // bucketExists 同时验证 MinIO 网络、凭据与目标 Bucket，可避免只检查端口造成假就绪。
+    const exists = await this.client.bucketExists(this.config.storageBucket);
+
+    if (!exists) {
+      throw new Error("对象存储 Bucket 不存在");
+    }
+  }
 }

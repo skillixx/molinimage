@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { UnrecoverableError, Worker, type Job } from "bullmq";
 import type { Redis } from "ioredis";
 
@@ -73,7 +75,10 @@ export class BullMqImageTaskWorker {
         { task_id: job.data.task_id },
         {
           attemptNumber: job.attemptsMade + 1,
-          maxAttempts: job.opts.attempts ?? 1
+          maxAttempts: job.opts.attempts ?? 1,
+          // 每次消费生成独立 request_id，并保留 BullMQ job_id 供跨进程日志关联。
+          requestId: `worker_request_${randomUUID().replaceAll("-", "")}`,
+          jobId: job.id ?? job.data.task_id
         }
       );
     } catch (error: unknown) {

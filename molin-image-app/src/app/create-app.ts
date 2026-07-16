@@ -39,7 +39,11 @@ import {
   MolingTicketError,
   type LaunchTicketVerifier
 } from "../infrastructure/moling/moling-client.js";
-import { createHealthResponse } from "../modules/health/health.service.js";
+import {
+  createHealthResponse,
+  type HealthService,
+  type ReadinessResponse
+} from "../modules/health/health.service.js";
 import type { ImageGenerationWorkerService } from "../workers/image-generation-worker-service.js";
 import {
   readCookie,
@@ -89,6 +93,7 @@ export interface AppDependencies {
   >;
   promptOptimizationService?: Pick<PromptOptimizationService, "optimizePrompt">;
   imageGenerationWorkerService?: Pick<ImageGenerationWorkerService, "processTask">;
+  healthService?: Pick<HealthService, "getLiveness" | "getReadiness">;
 }
 
 export function createAppRequestHandler(config: AppConfig, dependencies: AppDependencies) {
@@ -109,6 +114,19 @@ async function handleRequest(
   const sessionToken = readCookie(request, config.sessionCookieName);
   response.setHeader("X-Request-Id", requestId);
   let session: ApplicationSession | undefined;
+
+  if (request.method === "GET" && isLivenessPath(url.pathname)) {
+    // 存活检查必须在 Session 读取之前返回，Redis Session 故障不能让编排系统误杀仍存活的进程。
+    writeJson(response, 200, dependencies.healthService?.getLiveness() ?? createHealthResponse());
+    return;
+  }
+
+  if (request.method === "GET" && isReadinessPath(url.pathname)) {
+    const readiness =
+      (await dependencies.healthService?.getReadiness()) ?? createFallbackReadinessResponse();
+    writeJson(response, readiness.status === "error" ? 503 : 200, readiness);
+    return;
+  }
 
   try {
     // 鉴权只依赖异步 SessionStore 契约；Redis 故障必须中止请求，禁止静默降级为未登录。
@@ -243,11 +261,6 @@ async function handleRequest(
 
   if (request.method === "GET" && url.pathname.startsWith("/assets/")) {
     await servePublicFile(response, requestId, url.pathname.slice(1));
-    return;
-  }
-
-  if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/health")) {
-    writeJson(response, 200, createHealthResponse());
     return;
   }
 
@@ -2403,4 +2416,30 @@ function isAdminUser(userId: number, adminUserIds: number[] | undefined): boolea
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isLivenessPath(pathname: string): boolean {
+  return pathname === "/health/live" || pathname === "/api/health/live";
+}
+
+function isReadinessPath(pathname: string): boolean {
+  return (
+    pathname === "/health" ||
+    pathname === "/api/health" ||
+    pathname === "/health/ready" ||
+    pathname === "/api/health/ready"
+  );
+}
+
+function createFallbackReadinessResponse(): ReadinessResponse {
+  // 监控服务装配遗漏必须明确失败，不能把依赖未知的实例静默放入生产流量。
+  return {
+    status: "error",
+    service: "molin-image-app",
+    dependencies: { mysql: "error", redis: "error", minio: "error", queue: "error" },
+    worker: { status: "offline" },
+    queue: { waiting: 0, active: 0, delayed: 0, failed: 0, oldest_wait_ms: 0 },
+    outbox: { backlog: 0, dead_letter: 0, oldest_wait_ms: 0 },
+    alerts: []
+  };
 }

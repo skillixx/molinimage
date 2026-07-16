@@ -43,6 +43,33 @@ void test("Outbox 写入失败时回滚图片任务事务", async () => {
   ]);
 });
 
+void test("Outbox 监控统计积压、死信和最老等待时间", async () => {
+  const pool = {
+    execute: () => Promise.resolve([[{ backlog: 7, dead_letter: 2, oldest_wait_ms: 45_000 }], []])
+  } as unknown as Pool;
+  const repository = new MySqlImageTaskOutboxRepository(pool, new FakeTaskLookupRepository());
+
+  assert.deepEqual(await repository.getMonitoringSnapshot(), {
+    backlog: 7,
+    dead_letter: 2,
+    oldest_wait_ms: 45_000
+  });
+});
+
+void test("空 Outbox 的 MySQL 聚合 NULL 归一化为数字零", async () => {
+  const pool = {
+    execute: () =>
+      Promise.resolve([[{ backlog: null, dead_letter: null, oldest_wait_ms: null }], []])
+  } as unknown as Pool;
+  const repository = new MySqlImageTaskOutboxRepository(pool, new FakeTaskLookupRepository());
+
+  assert.deepEqual(await repository.getMonitoringSnapshot(), {
+    backlog: 0,
+    dead_letter: 0,
+    oldest_wait_ms: 0
+  });
+});
+
 class RecordingConnection {
   readonly operations: string[] = [];
   failOutboxInsert = false;

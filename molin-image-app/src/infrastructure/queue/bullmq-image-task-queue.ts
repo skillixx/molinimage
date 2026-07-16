@@ -1,4 +1,6 @@
-import { Queue, type JobsOptions } from "bullmq";
+import { randomUUID } from "node:crypto";
+
+import { Queue, type JobsOptions, type JobType } from "bullmq";
 import type { Redis } from "ioredis";
 
 import {
@@ -7,6 +9,14 @@ import {
   type ImageTaskJobData,
   type ImageTaskQueue
 } from "./image-task-queue.js";
+import type {
+  QueueHealthMonitor,
+  QueueMonitoringSnapshot
+} from "../../modules/health/health.service.js";
+
+export interface BullMqJobSummary {
+  timestamp: number;
+}
 
 export interface BullMqQueueClient {
   add(
@@ -16,18 +26,43 @@ export interface BullMqQueueClient {
   ): Promise<unknown>;
   getJobState?(jobId: string): Promise<string>;
   remove?(jobId: string): Promise<number>;
+  getJobCounts?(...types: JobType[]): Promise<Record<string, number>>;
+  getJobs?(
+    types?: JobType[] | JobType,
+    start?: number,
+    end?: number,
+    asc?: boolean
+  ): Promise<BullMqJobSummary[]>;
   close(): Promise<void>;
 }
 
-export class BullMqImageTaskQueue implements ImageTaskQueue {
+export interface BullMqWriteProbeJob {
+  remove(): Promise<void>;
+}
+
+export interface BullMqWriteProbeClient {
+  add(
+    name: typeof IMAGE_TASK_JOB_NAME,
+    data: ImageTaskJobData,
+    options: JobsOptions
+  ): Promise<BullMqWriteProbeJob>;
+  close(): Promise<void>;
+}
+
+export class BullMqImageTaskQueue implements ImageTaskQueue, QueueHealthMonitor {
   private readonly queue: BullMqQueueClient;
+  private readonly writeProbeQueue: BullMqWriteProbeClient | undefined;
 
   constructor(
     queueName: string,
     connection: Redis | undefined,
     private readonly attempts: number,
-    queue?: BullMqQueueClient
+    queue?: BullMqQueueClient,
+    writeProbeQueue?: BullMqWriteProbeClient
   ) {
+    this.connection = connection;
+    this.writeProbeQueue = writeProbeQueue;
+
     if (queue !== undefined) {
       this.queue = queue;
       return;
@@ -40,7 +75,13 @@ export class BullMqImageTaskQueue implements ImageTaskQueue {
     this.queue = new Queue<ImageTaskJobData, void, typeof IMAGE_TASK_JOB_NAME>(queueName, {
       connection
     });
+    this.writeProbeQueue = new Queue<ImageTaskJobData, void, typeof IMAGE_TASK_JOB_NAME>(
+      `${queueName}-health-probe`,
+      { connection }
+    );
   }
+
+  private readonly connection: Redis | undefined;
 
   async enqueue(taskId: string): Promise<void> {
     if (taskId.trim().length === 0) {
@@ -91,6 +132,55 @@ export class BullMqImageTaskQueue implements ImageTaskQueue {
   }
 
   async close(): Promise<void> {
-    await this.queue.close();
+    await Promise.all([this.queue.close(), this.writeProbeQueue?.close()]);
+  }
+
+  async checkWrite(): Promise<void> {
+    if (this.connection === undefined || this.writeProbeQueue === undefined) {
+      throw new ImageTaskQueueError();
+    }
+
+    try {
+      const probeId = `health_probe_${randomUUID().replaceAll("-", "")}`;
+      // 探针使用独立 BullMQ 队列执行真实 add 命令，业务 Worker 不监听该队列，因此不会消费虚假任务。
+      const probeJob = await this.writeProbeQueue.add(
+        IMAGE_TASK_JOB_NAME,
+        { task_id: probeId },
+        { jobId: probeId, removeOnComplete: true, removeOnFail: true }
+      );
+      await probeJob.remove();
+    } catch (error: unknown) {
+      throw new ImageTaskQueueError({ cause: error });
+    }
+  }
+
+  async getMonitoringSnapshot(): Promise<QueueMonitoringSnapshot> {
+    if (this.queue.getJobCounts === undefined || this.queue.getJobs === undefined) {
+      throw new ImageTaskQueueError();
+    }
+
+    try {
+      const [counts, oldestWaitingJobs] = await Promise.all([
+        this.queue.getJobCounts("wait", "active", "delayed", "failed"),
+        this.queue.getJobs(["wait"], 0, 0, true)
+      ]);
+      const oldestTimestamp =
+        oldestWaitingJobs.length === 0 ? undefined : oldestWaitingJobs[0].timestamp;
+
+      return {
+        waiting: counts.wait,
+        active: counts.active,
+        delayed: counts.delayed,
+        failed: counts.failed,
+        oldest_wait_ms:
+          oldestTimestamp === undefined ? 0 : Math.max(0, Date.now() - oldestTimestamp)
+      };
+    } catch (error: unknown) {
+      throw new ImageTaskQueueError({ cause: error });
+    }
+  }
+
+  async getSnapshot(): Promise<QueueMonitoringSnapshot> {
+    return await this.getMonitoringSnapshot();
   }
 }

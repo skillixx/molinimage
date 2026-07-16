@@ -13,6 +13,13 @@ export interface AppConfig {
   imageTaskRecoveryScanIntervalMs?: number;
   imageTaskStuckAfterMs?: number;
   imageTaskRecoveryBatchSize?: number;
+  workerHeartbeatIntervalMs?: number;
+  workerHeartbeatTtlSeconds?: number;
+  queueBacklogAlertThreshold?: number;
+  queueOldestWaitAlertMs?: number;
+  outboxBacklogAlertThreshold?: number;
+  healthProbeTimeoutMs?: number;
+  healthReadinessCacheTtlMs?: number;
   imageTaskExecutionMode: "inline" | "queue";
   imageTaskOutboxPollIntervalMs: number;
   imageTaskOutboxBatchSize: number;
@@ -88,6 +95,13 @@ type OptionalEnvKey =
   | "IMAGE_TASK_RECOVERY_SCAN_INTERVAL_MS"
   | "IMAGE_TASK_STUCK_AFTER_MS"
   | "IMAGE_TASK_RECOVERY_BATCH_SIZE"
+  | "WORKER_HEARTBEAT_INTERVAL_MS"
+  | "WORKER_HEARTBEAT_TTL_SECONDS"
+  | "QUEUE_BACKLOG_ALERT_THRESHOLD"
+  | "QUEUE_OLDEST_WAIT_ALERT_MS"
+  | "OUTBOX_BACKLOG_ALERT_THRESHOLD"
+  | "HEALTH_PROBE_TIMEOUT_MS"
+  | "HEALTH_READINESS_CACHE_TTL_MS"
   | "IMAGE_TASK_EXECUTION_MODE"
   | "IMAGE_TASK_OUTBOX_POLL_INTERVAL_MS"
   | "IMAGE_TASK_OUTBOX_BATCH_SIZE"
@@ -170,6 +184,34 @@ export function loadAppConfig(env: AppEnv = process.env): AppConfig {
     imageTaskRecoveryBatchSize: readPositiveInteger(
       env.IMAGE_TASK_RECOVERY_BATCH_SIZE?.trim() ?? "50",
       "IMAGE_TASK_RECOVERY_BATCH_SIZE"
+    ),
+    workerHeartbeatIntervalMs: readPositiveInteger(
+      env.WORKER_HEARTBEAT_INTERVAL_MS?.trim() ?? "5000",
+      "WORKER_HEARTBEAT_INTERVAL_MS"
+    ),
+    workerHeartbeatTtlSeconds: readPositiveInteger(
+      env.WORKER_HEARTBEAT_TTL_SECONDS?.trim() ?? "15",
+      "WORKER_HEARTBEAT_TTL_SECONDS"
+    ),
+    queueBacklogAlertThreshold: readPositiveInteger(
+      env.QUEUE_BACKLOG_ALERT_THRESHOLD?.trim() ?? "20",
+      "QUEUE_BACKLOG_ALERT_THRESHOLD"
+    ),
+    queueOldestWaitAlertMs: readPositiveInteger(
+      env.QUEUE_OLDEST_WAIT_ALERT_MS?.trim() ?? "60000",
+      "QUEUE_OLDEST_WAIT_ALERT_MS"
+    ),
+    outboxBacklogAlertThreshold: readPositiveInteger(
+      env.OUTBOX_BACKLOG_ALERT_THRESHOLD?.trim() ?? "10",
+      "OUTBOX_BACKLOG_ALERT_THRESHOLD"
+    ),
+    healthProbeTimeoutMs: readPositiveInteger(
+      env.HEALTH_PROBE_TIMEOUT_MS?.trim() ?? "5000",
+      "HEALTH_PROBE_TIMEOUT_MS"
+    ),
+    healthReadinessCacheTtlMs: readPositiveInteger(
+      env.HEALTH_READINESS_CACHE_TTL_MS?.trim() ?? "1000",
+      "HEALTH_READINESS_CACHE_TTL_MS"
     ),
     imageTaskExecutionMode: readImageTaskExecutionMode(env.IMAGE_TASK_EXECUTION_MODE, appEnv),
     imageTaskOutboxPollIntervalMs: readPositiveInteger(

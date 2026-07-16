@@ -1,5 +1,7 @@
 import "dotenv/config";
 
+import { randomUUID } from "node:crypto";
+
 import { ConfigError, loadAppConfig } from "../config/app-config.js";
 import {
   HttpAiGatewayImageEditClient,
@@ -22,6 +24,8 @@ import {
   checkRedisHealth,
   RedisHealthCheckError
 } from "../infrastructure/redis/redis-health-check.js";
+import { createRedisKey } from "../infrastructure/redis/redis-key.js";
+import { RedisWorkerHeartbeat } from "../infrastructure/redis/worker-heartbeat.js";
 import { MinioStorageService } from "../infrastructure/storage/minio-storage-service.js";
 import { BullMqImageTaskQueue } from "../infrastructure/queue/bullmq-image-task-queue.js";
 import { BillingService } from "../modules/billing/billing-service.js";
@@ -31,6 +35,7 @@ import { StylePresetService } from "../modules/style-presets/style-preset-servic
 import { BullMqImageTaskWorker } from "./bullmq-image-task-worker.js";
 import { ImageGenerationWorkerService } from "./image-generation-worker-service.js";
 import { ImageTaskJobProcessor } from "./image-task-job-processor.js";
+import { ConsoleImageTaskExecutionMetricsLogger } from "./image-task-observability.js";
 import { ImageTaskRecoveryScanner } from "./image-task-recovery-scanner.js";
 import { SharpImageOutputPostProcessor } from "./image-output-post-processor.js";
 
@@ -41,6 +46,15 @@ async function main(): Promise<void> {
   let queueWorker: BullMqImageTaskWorker | undefined;
   let recoveryQueue: BullMqImageTaskQueue | undefined;
   let recoveryScanner: ImageTaskRecoveryScanner | undefined;
+  const workerHeartbeat = new RedisWorkerHeartbeat(
+    redisConnection.client,
+    createRedisKey(config.redisKeyPrefix, "worker", "heartbeat"),
+    {
+      workerId: `worker_${randomUUID().replaceAll("-", "")}`,
+      ttlSeconds: config.workerHeartbeatTtlSeconds ?? 15,
+      intervalMs: config.workerHeartbeatIntervalMs ?? 5_000
+    }
+  );
 
   try {
     await redisConnection.connect();
@@ -93,7 +107,8 @@ async function main(): Promise<void> {
             workerLockToken: input.workerLockToken
           });
         }
-      }
+      },
+      new ConsoleImageTaskExecutionMetricsLogger()
     );
     queueWorker = new BullMqImageTaskWorker(
       config.imageTaskQueueName,
@@ -125,9 +140,11 @@ async function main(): Promise<void> {
       }
     );
     await queueWorker.waitUntilReady();
+    await workerHeartbeat.start();
     recoveryScanner.start();
   } catch (error: unknown) {
     await Promise.allSettled([
+      workerHeartbeat.stop(),
       recoveryScanner?.stop(),
       queueWorker?.close(),
       recoveryQueue?.close(),
@@ -148,6 +165,7 @@ async function main(): Promise<void> {
       queueWorker,
       recoveryScanner,
       recoveryQueue,
+      workerHeartbeat,
       async () => {
         await redisConnection.close();
       },
@@ -173,6 +191,7 @@ async function shutdownWorker(
   queueWorker: BullMqImageTaskWorker,
   recoveryScanner: ImageTaskRecoveryScanner | undefined,
   recoveryQueue: BullMqImageTaskQueue | undefined,
+  workerHeartbeat: RedisWorkerHeartbeat,
   closeRedis: () => Promise<void>,
   closeDatabase: () => Promise<void>,
   signal: NodeJS.Signals
@@ -183,6 +202,7 @@ async function shutdownWorker(
   // 必须先等待 BullMQ 当前处理函数结束，不能并行关闭它仍在使用的 Redis、MySQL 和 MinIO 依赖。
   closeResults.push(
     ...(await Promise.allSettled([
+      workerHeartbeat.stop(),
       recoveryScanner?.stop(),
       queueWorker.close(),
       recoveryQueue?.close()

@@ -37,7 +37,26 @@ npm test
 - `IMAGE_TASK_STUCK_AFTER_MS`：`billing_reserved`、`queued` 任务被判定为卡住的时长。
 - `IMAGE_TASK_RECOVERY_BATCH_SIZE`：每轮恢复扫描的最大任务数。
 
+监控相关配置：
+
+- `WORKER_HEARTBEAT_INTERVAL_MS`：Worker 刷新在线心跳的间隔。
+- `WORKER_HEARTBEAT_TTL_SECONDS`：Worker 心跳 TTL，必须大于刷新间隔。
+- `QUEUE_BACKLOG_ALERT_THRESHOLD`：队列等待任务数量告警阈值。
+- `QUEUE_OLDEST_WAIT_ALERT_MS`：最老等待任务持续时长告警阈值。
+- `OUTBOX_BACKLOG_ALERT_THRESHOLD`：Outbox 未完成记录数量告警阈值。
+- `HEALTH_PROBE_TIMEOUT_MS`：单个依赖探针最大执行时间。
+- `HEALTH_READINESS_CACHE_TTL_MS`：readiness 短时缓存时间，并用于合并并发探测请求。
+
 管理员可通过 `/admin/task-recovery` 查看最终失败原因、尝试次数和计费状态，并创建幂等的 retry task 重新投递。中间队列重试不会提前释放预占积分。
+
+## 健康检查与监控
+
+- `GET /api/health/live`：存活检查，只验证 API 进程能够响应，不访问外部依赖。
+- `GET /api/health/ready`：就绪检查，验证 MySQL、Redis、MinIO、隔离 BullMQ 探针队列的真实写入能力和 Worker 心跳；依赖或 Worker 不可用时返回 HTTP `503`。
+- `GET /api/health`：兼容入口，与 readiness 返回相同结果。
+- readiness 返回队列 `waiting`、`active`、`delayed`、`failed`、`oldest_wait_ms`，以及 Outbox `backlog`、`dead_letter`、`oldest_wait_ms`。
+- 队列持续积压、Outbox 积压/死信会进入 `alerts`；只有告警但依赖可用时状态为 `degraded`，关键依赖或 Worker 离线时状态为 `error`。
+- Worker 执行日志只记录 `request_id`、`task_id`、`job_id`、尝试次数和三类耗时，不记录提示词、Token、图片内容、连接串或内部错误堆栈。
 
 ## 数据库迁移
 

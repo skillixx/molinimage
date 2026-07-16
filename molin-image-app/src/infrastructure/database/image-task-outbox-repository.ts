@@ -8,6 +8,7 @@ import {
   type ImageTaskRecord,
   type MySqlImageTasksRepository
 } from "./image-tasks-repository.js";
+import type { OutboxMonitoringSnapshot } from "../../modules/health/health.service.js";
 
 export type ImageTaskOutboxStatus =
   "pending" | "dispatching" | "dispatched" | "failed" | "cancelled";
@@ -42,6 +43,16 @@ export interface ImageTaskOutboxRepository {
   claimTimedOut(limit: number, maxWaitMs: number): Promise<ImageTaskOutboxRecord[]>;
 }
 
+export interface ImageTaskOutboxMonitoringRepository {
+  getMonitoringSnapshot(): Promise<OutboxMonitoringSnapshot>;
+}
+
+interface ImageTaskOutboxMonitoringRow extends RowDataPacket {
+  backlog: number | string | null;
+  dead_letter: number | string | null;
+  oldest_wait_ms: number | string | null;
+}
+
 interface ImageTaskOutboxRow extends RowDataPacket {
   id: string;
   task_id: string;
@@ -56,7 +67,10 @@ interface ImageTaskOutboxRow extends RowDataPacket {
 }
 
 export class MySqlImageTaskOutboxRepository
-  implements ImageTaskCreationRepository, ImageTaskOutboxRepository
+  implements
+    ImageTaskCreationRepository,
+    ImageTaskOutboxRepository,
+    ImageTaskOutboxMonitoringRepository
 {
   constructor(
     private readonly pool: Pool,
@@ -186,6 +200,34 @@ export class MySqlImageTaskOutboxRepository
       "cancelled",
       false
     );
+  }
+
+  async getMonitoringSnapshot(): Promise<OutboxMonitoringSnapshot> {
+    const [rows] = await this.pool.execute<ImageTaskOutboxMonitoringRow[]>(
+      `SELECT
+         SUM(status IN ('pending', 'dispatching', 'failed')) AS backlog,
+         SUM(status = 'cancelled') AS dead_letter,
+         COALESCE(
+           TIMESTAMPDIFF(
+             MICROSECOND,
+             MIN(CASE WHEN status IN ('pending', 'dispatching', 'failed') THEN created_at END),
+             CURRENT_TIMESTAMP(3)
+           ) DIV 1000,
+           0
+         ) AS oldest_wait_ms
+       FROM image_task_outbox`
+    );
+    const row = rows[0];
+
+    return {
+      backlog: Number(row.backlog ?? 0),
+      dead_letter: Number(row.dead_letter ?? 0),
+      oldest_wait_ms: Math.max(0, Number(row.oldest_wait_ms ?? 0))
+    };
+  }
+
+  async getSnapshot(): Promise<OutboxMonitoringSnapshot> {
+    return await this.getMonitoringSnapshot();
   }
 
   private async claimRows(

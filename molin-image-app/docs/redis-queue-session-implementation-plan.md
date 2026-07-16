@@ -77,7 +77,7 @@ Redis / BullMQ
 | G05  | 独立 Worker 消费任务         | 已完成 | G04       |
 | G06  | API 和前端异步化             | 已完成 | G05       |
 | G07  | 重试、恢复和死信处理         | 已完成 | G06       |
-| G08  | 健康检查、监控与管理能力     | 待执行 | G07       |
+| G08  | 健康检查、监控与管理能力     | 已完成 | G07       |
 | G09  | 集成测试、灰度切换和部署验收 | 待执行 | G08       |
 
 状态只能使用：`待执行`、`执行中`、`已完成`、`阻塞`。
@@ -500,6 +500,17 @@ dispatched_at
 - Worker 全部离线时能够告警。
 - 队列持续积压时能够告警。
 - 健康检查不输出连接串和内部错误堆栈。
+
+### 实施结果
+
+- 已新增 `/api/health/live` 与 `/api/health/ready`，并让 `/api/health` 兼容指向 readiness；健康路由在 Session 读取前执行，Redis Session 故障不会污染 liveness。
+- readiness 已真实检查 MySQL 最小查询、Redis PING、MinIO Bucket，并通过独立 BullMQ 健康队列执行真实 `add + remove`；业务 Worker 不监听探针队列。
+- 每个依赖探针均有硬超时；readiness 使用短时缓存并合并并发请求，避免外部反复探测放大数据库、存储和队列负载。
+- 每个 Worker 通过独立 Redis Key 写入短 TTL 心跳，注册表只聚合仍有实例 Key 的 Worker；单个实例退出不会把其他在线 Worker 误报为离线。
+- 已返回队列等待/处理/延迟/失败数量和最老等待时间，以及 Outbox 积压、死信和最老等待时间；持续积压按数量与等待时长双阈值告警。
+- Worker 已按首次 `worker_started_at - created_at` 记录排队耗时，并记录执行耗时和端到端耗时；结构化日志仅包含 `request_id`、`task_id`、`job_id` 和白名单指标，日志失败不影响任务状态。
+- 失败任务管理继续复用 G07 的管理员 Session 白名单和审计记录，未新增绕过鉴权的重投递入口。
+- 自动化测试覆盖 Redis 故障、Worker 离线、持续积压、空 Outbox 聚合、健康响应脱敏和心跳 TTL；真实 MySQL、Redis、MinIO、BullMQ 探针均已验证。
 
 ## 15. G09 集成测试、灰度切换与部署验收
 

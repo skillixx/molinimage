@@ -15,6 +15,7 @@ import { MySqlAiGatewayCallLogsRepository } from "../infrastructure/database/ai-
 import { MySqlBillingReconciliationRepository } from "../infrastructure/database/billing-reconciliation-repository.js";
 import { MySqlBillingEventsRepository } from "../infrastructure/database/billing-events-repository.js";
 import { createDatabasePool } from "../infrastructure/database/database-pool.js";
+import { MySqlHealthProbe } from "../infrastructure/database/database-health-check.js";
 import { MySqlFilesRepository } from "../infrastructure/database/files-repository.js";
 import { MySqlImageModelConfigsRepository } from "../infrastructure/database/image-model-configs-repository.js";
 import { MySqlImageTaskOutboxRepository } from "../infrastructure/database/image-task-outbox-repository.js";
@@ -34,6 +35,8 @@ import {
 } from "../infrastructure/redis/redis-health-check.js";
 import { BullMqImageTaskQueue } from "../infrastructure/queue/bullmq-image-task-queue.js";
 import { ImageTaskOutboxDispatcher } from "../infrastructure/queue/image-task-outbox-dispatcher.js";
+import { createRedisKey } from "../infrastructure/redis/redis-key.js";
+import { RedisWorkerHeartbeatReader } from "../infrastructure/redis/worker-heartbeat.js";
 import { MinioStorageService } from "../infrastructure/storage/minio-storage-service.js";
 import { BillingService } from "../modules/billing/billing-service.js";
 import { BillingRecordService } from "../modules/billing/billing-record-service.js";
@@ -49,6 +52,7 @@ import { ImageTaskRecoveryService } from "../modules/image-tasks/image-task-reco
 import { RiskControlService } from "../modules/risk-control/risk-control-service.js";
 import { StylePresetService } from "../modules/style-presets/style-preset-service.js";
 import { PromptOptimizationService } from "../modules/prompts/prompt-optimization-service.js";
+import { HealthService } from "../modules/health/health.service.js";
 import { RedisSessionStore } from "../modules/auth/redis-session-store.js";
 import { InMemorySessionStore } from "../modules/auth/session-store.js";
 import { ImageGenerationWorkerService } from "../workers/image-generation-worker-service.js";
@@ -166,6 +170,35 @@ const outboxDispatcher =
         maxWaitMs: config.imageTaskOutboxMaxWaitMs,
         maxBackoffMs: config.imageTaskOutboxMaxBackoffMs
       });
+const healthService = new HealthService(
+  {
+    mysql: new MySqlHealthProbe(databasePool),
+    redis: {
+      check: async () => {
+        await checkRedisHealth(redisConnection);
+      }
+    },
+    minio: {
+      check: async () => {
+        await storageService.checkHealth();
+      }
+    },
+    queue: imageTaskQueue,
+    worker: new RedisWorkerHeartbeatReader(
+      redisConnection.client,
+      createRedisKey(config.redisKeyPrefix, "worker", "heartbeat")
+    ),
+    outbox: imageTaskOutboxRepository
+  },
+  {
+    queueEnabled: config.imageTaskExecutionMode === "queue",
+    queueBacklogAlertThreshold: config.queueBacklogAlertThreshold ?? 20,
+    queueOldestWaitAlertMs: config.queueOldestWaitAlertMs ?? 60_000,
+    outboxBacklogAlertThreshold: config.outboxBacklogAlertThreshold ?? 10,
+    probeTimeoutMs: config.healthProbeTimeoutMs ?? 5_000,
+    readinessCacheTtlMs: config.healthReadinessCacheTtlMs ?? 1_000
+  }
+);
 
 const server = createServer(
   createAppRequestHandler(config, {
@@ -182,7 +215,8 @@ const server = createServer(
     pricingRuleService,
     stylePresetService,
     promptOptimizationService,
-    imageGenerationWorkerService
+    imageGenerationWorkerService,
+    healthService
   })
 );
 
