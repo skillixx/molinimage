@@ -6,7 +6,6 @@ import test from "node:test";
 
 import { loadAppConfig } from "../src/config/app-config.js";
 import { MySqlHealthProbe } from "../src/infrastructure/database/database-health-check.js";
-import { createDatabasePool } from "../src/infrastructure/database/database-pool.js";
 import { MySqlImageTaskOutboxRepository } from "../src/infrastructure/database/image-task-outbox-repository.js";
 import { MySqlImageTasksRepository } from "../src/infrastructure/database/image-tasks-repository.js";
 import { BullMqImageTaskQueue } from "../src/infrastructure/queue/bullmq-image-task-queue.js";
@@ -22,6 +21,7 @@ import {
 } from "../src/infrastructure/redis/worker-heartbeat.js";
 import { MinioStorageService } from "../src/infrastructure/storage/minio-storage-service.js";
 import { HealthService } from "../src/modules/health/health.service.js";
+import { createIsolatedIntegrationPool } from "./support/isolated-integration-database.js";
 
 const runHealthIntegrationTest =
   process.env.RUN_QUEUE_INTEGRATION_TESTS === "true" ? test : test.skip;
@@ -32,7 +32,7 @@ void runHealthIntegrationTest(
   async () => {
     const config = loadAppConfig(process.env);
     const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
-    const pool = createDatabasePool(config);
+    const pool = await createIsolatedIntegrationPool(config, ["image_tasks", "image_task_outbox"]);
     const redis = createRedisConnection(config, "api", silentLogger);
     const queueRedis = createBullMqRedisConnection(config, "queue", silentLogger);
     const taskRepository = new MySqlImageTasksRepository(pool);
@@ -73,6 +73,7 @@ void runHealthIntegrationTest(
           outbox
         },
         {
+          sessionStore: "redis",
           queueEnabled: true,
           queueBacklogAlertThreshold: 1_000,
           queueOldestWaitAlertMs: 600_000,

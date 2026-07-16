@@ -40,6 +40,7 @@ const completeEnv = {
   RISK_CONTROL_DISABLED_CAPABILITIES: "upscale",
   TRUST_PROXY: "true",
   INTERNAL_API_TOKEN: "replace_with_internal_api_token",
+  DEPLOYMENT_GATE_TOKEN: "replace_with_deployment_gate_token",
   SESSION_STORE: "redis",
   SESSION_COOKIE_NAME: "molinimage_session",
   SESSION_COOKIE_SECURE: "false",
@@ -100,6 +101,7 @@ void test("配置完整时可以加载应用配置", () => {
     riskControlDisabledCapabilities: ["upscale"],
     trustProxy: true,
     internalApiToken: "replace_with_internal_api_token",
+    deploymentGateToken: "replace_with_deployment_gate_token",
     adminUserIds: [],
     sessionStore: "redis",
     sessionCookieName: "molinimage_session",
@@ -107,6 +109,17 @@ void test("配置完整时可以加载应用配置", () => {
     sessionTtlSeconds: 86400,
     port: 3100
   });
+});
+
+void test("部署门禁令牌不能复用高权限内部令牌", () => {
+  assert.throws(
+    () =>
+      loadAppConfig({
+        ...completeEnv,
+        DEPLOYMENT_GATE_TOKEN: completeEnv.INTERNAL_API_TOKEN
+      }),
+    /DEPLOYMENT_GATE_TOKEN 必须与 INTERNAL_API_TOKEN 使用不同值/
+  );
 });
 
 void test("风控限额不允许配置为负数", () => {

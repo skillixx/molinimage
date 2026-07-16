@@ -32,17 +32,31 @@ export interface FailedImageTaskListResult {
   total: number;
 }
 
-export interface ImageTaskRecoveryAuditEvent {
-  event_type: "image_task_manual_replay";
-  actor_user_id: number;
-  owner_user_id: number;
-  source_task_id: string;
-  retry_task_id: string;
-  request_id: string | null;
-}
+export type ImageTaskRecoveryAuditEvent =
+  | {
+      event_type: "image_task_manual_replay";
+      actor_user_id: number;
+      owner_user_id: number;
+      source_task_id: string;
+      retry_task_id: string;
+      request_id: string | null;
+    }
+  | {
+      event_type: "image_task_failed_job_cleanup_failed";
+      actor_user_id: number;
+      owner_user_id: number;
+      source_task_id: string;
+      retry_task_id: string;
+      request_id: string | null;
+      error_code: "FAILED_JOB_CLEANUP_FAILED";
+    };
 
 export interface ImageTaskRecoveryAuditLogger {
   record(event: ImageTaskRecoveryAuditEvent): void | Promise<void>;
+}
+
+export interface FailedImageTaskJobCleaner {
+  removeFailed(taskId: string): Promise<void>;
 }
 
 export class ImageTaskRecoveryServiceError extends Error {
@@ -60,7 +74,8 @@ export class ImageTaskRecoveryService {
   constructor(
     private readonly repository: ImageTaskRecoveryRepository,
     private readonly imageTaskService: Pick<ImageTaskService, "retryTask">,
-    private readonly auditLogger?: ImageTaskRecoveryAuditLogger
+    private readonly auditLogger?: ImageTaskRecoveryAuditLogger,
+    private readonly failedJobCleaner?: FailedImageTaskJobCleaner
   ) {}
 
   async listFailedTasks(input: {
@@ -130,6 +145,26 @@ export class ImageTaskRecoveryService {
       retry_task_id: result.task.id,
       request_id: input.requestId ?? null
     });
+
+    try {
+      // 重投事实完成审计后，再原子移除对应旧 failed Job，使部署门禁可逐项收敛。
+      await this.failedJobCleaner?.removeFailed(sourceTask.id);
+    } catch {
+      await this.auditLogger?.record({
+        event_type: "image_task_failed_job_cleanup_failed",
+        actor_user_id: input.actorUserId,
+        owner_user_id: sourceTask.owner_user_id,
+        source_task_id: sourceTask.id,
+        retry_task_id: result.task.id,
+        request_id: input.requestId ?? null,
+        error_code: "FAILED_JOB_CLEANUP_FAILED"
+      });
+      throw new ImageTaskRecoveryServiceError(
+        "FAILED_JOB_CLEANUP_FAILED",
+        "重试任务已创建，但旧失败记录尚未收敛，请稍后重试。",
+        503
+      );
+    }
 
     return result;
   }

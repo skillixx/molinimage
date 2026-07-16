@@ -49,8 +49,24 @@ export const imageRestoreModes = [
     requires_annotation: false,
     parameter_schema: [
       ...commonParameters,
-      { key: "denoise_level", label: "去噪程度", type: "range", min: 0, max: 100, step: 5, unit: "%" },
-      { key: "clarity_level", label: "清晰度", type: "range", min: 0, max: 100, step: 5, unit: "%" },
+      {
+        key: "denoise_level",
+        label: "去噪程度",
+        type: "range",
+        min: 0,
+        max: 100,
+        step: 5,
+        unit: "%"
+      },
+      {
+        key: "clarity_level",
+        label: "清晰度",
+        type: "range",
+        min: 0,
+        max: 100,
+        step: 5,
+        unit: "%"
+      },
       { key: "restore_color", label: "色彩恢复", type: "toggle" }
     ],
     defaults: {
@@ -73,7 +89,15 @@ export const imageRestoreModes = [
     requires_annotation: false,
     parameter_schema: [
       ...commonParameters,
-      { key: "denoise_level", label: "去噪程度", type: "range", min: 10, max: 100, step: 5, unit: "%" }
+      {
+        key: "denoise_level",
+        label: "去噪程度",
+        type: "range",
+        min: 10,
+        max: 100,
+        step: 5,
+        unit: "%"
+      }
     ],
     defaults: {
       restore_strength: "standard",
@@ -93,7 +117,15 @@ export const imageRestoreModes = [
     requires_annotation: false,
     parameter_schema: [
       ...commonParameters,
-      { key: "clarity_level", label: "清晰度", type: "range", min: 10, max: 100, step: 5, unit: "%" }
+      {
+        key: "clarity_level",
+        label: "清晰度",
+        type: "range",
+        min: 10,
+        max: 100,
+        step: 5,
+        unit: "%"
+      }
     ],
     defaults: {
       restore_strength: "standard",
@@ -113,7 +145,15 @@ export const imageRestoreModes = [
     requires_annotation: false,
     parameter_schema: [
       ...commonParameters,
-      { key: "scratch_repair", label: "划痕修复", type: "range", min: 10, max: 100, step: 5, unit: "%" },
+      {
+        key: "scratch_repair",
+        label: "划痕修复",
+        type: "range",
+        min: 10,
+        max: 100,
+        step: 5,
+        unit: "%"
+      },
       { key: "restore_color", label: "恢复自然色彩", type: "toggle" }
     ],
     defaults: {
@@ -135,7 +175,15 @@ export const imageRestoreModes = [
     requires_annotation: false,
     parameter_schema: [
       ...commonParameters,
-      { key: "color_strength", label: "色彩恢复", type: "range", min: 10, max: 100, step: 5, unit: "%" }
+      {
+        key: "color_strength",
+        label: "色彩恢复",
+        type: "range",
+        min: 10,
+        max: 100,
+        step: 5,
+        unit: "%"
+      }
     ],
     defaults: {
       restore_strength: "standard",
@@ -197,7 +245,15 @@ export const imageRestoreModes = [
     requires_annotation: true,
     parameter_schema: [
       ...commonParameters,
-      { key: "fill_consistency", label: "背景一致性", type: "range", min: 20, max: 100, step: 5, unit: "%" }
+      {
+        key: "fill_consistency",
+        label: "背景一致性",
+        type: "range",
+        min: 20,
+        max: 100,
+        step: 5,
+        unit: "%"
+      }
     ],
     defaults: {
       restore_strength: "strong",

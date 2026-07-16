@@ -44,6 +44,7 @@ import {
   type HealthService,
   type ReadinessResponse
 } from "../modules/health/health.service.js";
+import type { DeploymentGateService } from "../modules/health/deployment-gate.service.js";
 import type { ImageGenerationWorkerService } from "../workers/image-generation-worker-service.js";
 import {
   readCookie,
@@ -94,6 +95,7 @@ export interface AppDependencies {
   promptOptimizationService?: Pick<PromptOptimizationService, "optimizePrompt">;
   imageGenerationWorkerService?: Pick<ImageGenerationWorkerService, "processTask">;
   healthService?: Pick<HealthService, "getLiveness" | "getReadiness">;
+  deploymentGateService?: Pick<DeploymentGateService, "getSnapshot">;
 }
 
 export function createAppRequestHandler(config: AppConfig, dependencies: AppDependencies) {
@@ -125,6 +127,29 @@ async function handleRequest(
     const readiness =
       (await dependencies.healthService?.getReadiness()) ?? createFallbackReadinessResponse();
     writeJson(response, readiness.status === "error" ? 503 : 200, readiness);
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/internal/deployment/gate") {
+    if (
+      config.deploymentGateToken === undefined ||
+      !hasValidInternalToken(request, config.deploymentGateToken)
+    ) {
+      writeError(response, 401, requestId, "INTERNAL_UNAUTHORIZED", "内部接口令牌无效。");
+      return;
+    }
+
+    if (dependencies.deploymentGateService === undefined) {
+      writeError(response, 503, requestId, "DEPLOYMENT_GATE_UNAVAILABLE", "部署门禁暂不可用。");
+      return;
+    }
+
+    try {
+      writeJson(response, 200, await dependencies.deploymentGateService.getSnapshot());
+    } catch {
+      // 内部接口同样不能透出 Redis、MySQL 原始错误或连接信息。
+      writeError(response, 503, requestId, "DEPLOYMENT_GATE_UNAVAILABLE", "部署门禁暂不可用。");
+    }
     return;
   }
 
@@ -2436,9 +2461,19 @@ function createFallbackReadinessResponse(): ReadinessResponse {
   return {
     status: "error",
     service: "molin-image-app",
+    runtime: {
+      session_store: "memory",
+      image_task_execution_mode: "inline"
+    },
     dependencies: { mysql: "error", redis: "error", minio: "error", queue: "error" },
     worker: { status: "offline" },
-    queue: { waiting: 0, active: 0, delayed: 0, failed: 0, oldest_wait_ms: 0 },
+    queue: {
+      waiting: 0,
+      active: 0,
+      delayed: 0,
+      failed: 0,
+      oldest_wait_ms: 0
+    },
     outbox: { backlog: 0, dead_letter: 0, oldest_wait_ms: 0 },
     alerts: []
   };

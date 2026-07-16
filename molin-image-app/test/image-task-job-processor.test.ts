@@ -105,7 +105,8 @@ void test("长任务会续期数据库租约并在处理完成后停止心跳", 
     repository,
     {
       async processTask(_taskId, context): Promise<void> {
-        await new Promise((resolve) => setTimeout(resolve, 45));
+        // 等到真实发生两次续租再结束任务，避免全量并发测试受定时器调度抖动影响。
+        await waitFor(() => repository.renewCount >= 2);
         await context.assertActive();
       }
     },

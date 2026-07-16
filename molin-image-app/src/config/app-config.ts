@@ -48,6 +48,7 @@ export interface AppConfig {
   riskControlDisabledCapabilities: string[];
   trustProxy: boolean;
   internalApiToken: string;
+  deploymentGateToken?: string;
   adminUserIds?: number[];
   sessionStore: "memory" | "redis";
   sessionCookieName: string;
@@ -83,6 +84,7 @@ type RequiredEnvKey = (typeof requiredEnvKeys)[number];
 
 type OptionalEnvKey =
   | "APP_ENV"
+  | "DEPLOYMENT_GATE_TOKEN"
   | "PORT"
   | "REDIS_KEY_PREFIX"
   | "REDIS_CONNECT_TIMEOUT_MS"
@@ -278,6 +280,11 @@ export function loadAppConfig(env: AppEnv = process.env): AppConfig {
     riskControlDisabledCapabilities: readCsvList(env.RISK_CONTROL_DISABLED_CAPABILITIES, ""),
     trustProxy: readBoolean(env.TRUST_PROXY, false),
     internalApiToken: readRequiredEnv(env, "INTERNAL_API_TOKEN"),
+    // 部署门禁使用独立只读令牌，避免验收脚本携带可调用计费写接口的内部令牌。
+    deploymentGateToken: readDeploymentGateToken(
+      env.DEPLOYMENT_GATE_TOKEN,
+      readRequiredEnv(env, "INTERNAL_API_TOKEN")
+    ),
     adminUserIds: readPositiveIntegerList(env.MOLINIMAGE_ADMIN_USER_IDS),
     sessionStore: readSessionStore(env.SESSION_STORE, appEnv),
     sessionCookieName: readOptionalText(env.SESSION_COOKIE_NAME, "molinimage_session"),
@@ -344,6 +351,22 @@ function readOptionalText(value: string | undefined, defaultValue: string): stri
   const text = value?.trim();
 
   return text === undefined || text.length === 0 ? defaultValue : text;
+}
+
+function readDeploymentGateToken(
+  value: string | undefined,
+  internalApiToken: string
+): string | undefined {
+  const token = value?.trim();
+  if (token === undefined || token.length === 0) {
+    return undefined;
+  }
+
+  if (token === internalApiToken) {
+    throw new Error("DEPLOYMENT_GATE_TOKEN 必须与 INTERNAL_API_TOKEN 使用不同值。");
+  }
+
+  return token;
 }
 
 function readCsvList(value: string | undefined, defaultValue: string): string[] {

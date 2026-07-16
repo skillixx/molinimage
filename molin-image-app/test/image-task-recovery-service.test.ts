@@ -31,6 +31,7 @@ void test("人工重投沿用原任务所有者和权益并返回新 retry task"
   const task = createFailedTask();
   const calls: unknown[][] = [];
   const auditEvents: unknown[] = [];
+  const removedFailedJobIds: string[] = [];
   const service = new ImageTaskRecoveryService(
     {
       findById: () => Promise.resolve(task),
@@ -49,6 +50,12 @@ void test("人工重投沿用原任务所有者和权益并返回新 retry task"
       record(event): void {
         auditEvents.push(event);
       }
+    },
+    {
+      removeFailed(taskId): Promise<void> {
+        removedFailedJobIds.push(taskId);
+        return Promise.resolve();
+      }
     }
   );
 
@@ -60,6 +67,7 @@ void test("人工重投沿用原任务所有者和权益并返回新 retry task"
 
   assert.equal(result.retried_from_task_id, task.id);
   assert.deepEqual(calls[0], [479, task.id, 64, { requestId: "req_admin" }]);
+  assert.deepEqual(removedFailedJobIds, [task.id]);
   assert.deepEqual(auditEvents, [
     {
       event_type: "image_task_manual_replay",
@@ -88,6 +96,41 @@ void test("积分释放待对账任务禁止人工重投", async () => {
     () => service.replayFailedTask({ taskId: task.id, actorUserId: 999 }),
     (error: unknown) =>
       error instanceof Error && error.message === "原任务积分仍在释放中，请先完成计费对账。"
+  );
+});
+
+void test("旧 failed Job 清理失败时保留重投审计并记录清理失败", async () => {
+  const task = createFailedTask();
+  const auditEvents: unknown[] = [];
+  const service = new ImageTaskRecoveryService(
+    {
+      findById: () => Promise.resolve(task),
+      findFailedTasks: () => Promise.resolve({ items: [], total: 0 })
+    },
+    {
+      retryTask: () =>
+        Promise.resolve({
+          task: { id: "task_retry" } as never,
+          retried_from_task_id: task.id
+        })
+    },
+    {
+      record(event): void {
+        auditEvents.push(event);
+      }
+    },
+    {
+      removeFailed: () => Promise.reject(new Error("redis unavailable"))
+    }
+  );
+
+  await assert.rejects(
+    () => service.replayFailedTask({ taskId: task.id, actorUserId: 999 }),
+    /重试任务已创建，但旧失败记录尚未收敛/u
+  );
+  assert.deepEqual(
+    auditEvents.map((event) => (event as { event_type: string }).event_type),
+    ["image_task_manual_replay", "image_task_failed_job_cleanup_failed"]
   );
 });
 

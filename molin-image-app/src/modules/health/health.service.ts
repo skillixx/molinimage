@@ -49,6 +49,10 @@ export interface HealthAlert {
 export interface ReadinessResponse {
   status: "ok" | "degraded" | "error";
   service: "molin-image-app";
+  runtime: {
+    session_store: "redis" | "memory";
+    image_task_execution_mode: "queue" | "inline";
+  };
   dependencies: {
     mysql: HealthDependencyStatus;
     redis: HealthDependencyStatus;
@@ -71,6 +75,7 @@ export interface HealthServiceDependencies {
 }
 
 export interface HealthServiceOptions {
+  sessionStore: "redis" | "memory";
   queueEnabled: boolean;
   queueBacklogAlertThreshold: number;
   queueOldestWaitAlertMs: number;
@@ -169,6 +174,11 @@ export class HealthService {
     return {
       status: dependencyFailed || criticalAlert ? "error" : alerts.length > 0 ? "degraded" : "ok",
       service: "molin-image-app",
+      // 部署探针只暴露非敏感运行模式，用于确认远端实例没有误用本地降级配置。
+      runtime: {
+        session_store: this.options.sessionStore,
+        image_task_execution_mode: this.options.queueEnabled ? "queue" : "inline"
+      },
       dependencies,
       worker,
       queue,

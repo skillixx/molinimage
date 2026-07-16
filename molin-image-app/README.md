@@ -15,7 +15,11 @@ npm run build
 npm run lint
 npm run format:check
 npm test
+npm run test:integration
+npm run acceptance
 ```
+
+G09 商业化验收会串行执行真实 Redis Session、两个独立 API 进程、MySQL Outbox、BullMQ 多 Worker 和健康探针测试。部署完成后设置 `DEPLOYMENT_API_BASE_URL`，再执行 `npm run validate:deployment`，确认远端运行模式、API、MySQL、Redis、MinIO、队列、Worker 和计费对账门禁全部就绪。failed Job 与孤立预占由目标 API 的令牌保护内部门禁检查，failed Job 非零时需按 [G09 部署验收](docs/g09-deployment-acceptance.md) 审核并填写其 ID 集合摘要。
 
 ## 目录边界
 

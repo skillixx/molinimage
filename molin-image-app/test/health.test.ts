@@ -78,7 +78,13 @@ void test("Outbox 指标查询失败时 readiness 失败且不输出数据库错
       queue: {
         checkWrite: () => Promise.resolve(),
         getSnapshot: () =>
-          Promise.resolve({ waiting: 0, active: 0, delayed: 0, failed: 0, oldest_wait_ms: 0 })
+          Promise.resolve({
+            waiting: 0,
+            active: 0,
+            delayed: 0,
+            failed: 0,
+            oldest_wait_ms: 0
+          })
       },
       worker: { isAlive: () => Promise.resolve(true) },
       outbox: {
@@ -86,6 +92,7 @@ void test("Outbox 指标查询失败时 readiness 失败且不输出数据库错
       }
     },
     {
+      sessionStore: "redis",
       queueEnabled: true,
       queueBacklogAlertThreshold: 10,
       queueOldestWaitAlertMs: 60_000,
@@ -142,6 +149,7 @@ void test("依赖探针超时会及时返回失败", async () => {
       minio: new FakeProbe()
     },
     {
+      sessionStore: "memory",
       queueEnabled: false,
       queueBacklogAlertThreshold: 10,
       queueOldestWaitAlertMs: 60_000,
@@ -176,6 +184,7 @@ void test("readiness 短时缓存并合并重复依赖探测", async () => {
   const service = new HealthService(
     { mysql: countingProbe, redis: countingProbe, minio: countingProbe },
     {
+      sessionStore: "memory",
       queueEnabled: false,
       queueBacklogAlertThreshold: 10,
       queueOldestWaitAlertMs: 60_000,
@@ -227,6 +236,7 @@ function createHealthService(
       }
     },
     {
+      sessionStore: "redis",
       queueEnabled: true,
       queueBacklogAlertThreshold: 10,
       queueOldestWaitAlertMs: 60_000,

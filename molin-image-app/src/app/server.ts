@@ -53,6 +53,7 @@ import { RiskControlService } from "../modules/risk-control/risk-control-service
 import { StylePresetService } from "../modules/style-presets/style-preset-service.js";
 import { PromptOptimizationService } from "../modules/prompts/prompt-optimization-service.js";
 import { HealthService } from "../modules/health/health.service.js";
+import { DeploymentGateService } from "../modules/health/deployment-gate.service.js";
 import { RedisSessionStore } from "../modules/auth/redis-session-store.js";
 import { InMemorySessionStore } from "../modules/auth/session-store.js";
 import { ImageGenerationWorkerService } from "../workers/image-generation-worker-service.js";
@@ -117,14 +118,6 @@ const billingReconciliationService = new BillingReconciliationService(
   imageTaskService,
   billingService
 );
-const imageTaskRecoveryService = new ImageTaskRecoveryService(
-  {
-    findById: (taskId) => imageTasksRepository.findById(taskId),
-    findFailedTasks: (input) => imageTasksRepository.findFailedTasks(input)
-  },
-  imageTaskService,
-  new ConsoleImageTaskRecoveryAuditLogger()
-);
 const imageGenerationClient = new HttpAiGatewayImageGenerationClient(config);
 const imageEditClient = new HttpAiGatewayImageEditClient(config);
 const visionTextClient = new HttpAiGatewayVisionTextClient(config);
@@ -161,6 +154,15 @@ const imageTaskQueue =
         queueRedisConnection.client,
         config.imageTaskJobAttempts
       );
+const imageTaskRecoveryService = new ImageTaskRecoveryService(
+  {
+    findById: (taskId) => imageTasksRepository.findById(taskId),
+    findFailedTasks: (input) => imageTasksRepository.findFailedTasks(input)
+  },
+  imageTaskService,
+  new ConsoleImageTaskRecoveryAuditLogger(),
+  imageTaskQueue
+);
 const outboxDispatcher =
   imageTaskQueue === undefined
     ? undefined
@@ -191,6 +193,7 @@ const healthService = new HealthService(
     outbox: imageTaskOutboxRepository
   },
   {
+    sessionStore: config.sessionStore,
     queueEnabled: config.imageTaskExecutionMode === "queue",
     queueBacklogAlertThreshold: config.queueBacklogAlertThreshold ?? 20,
     queueOldestWaitAlertMs: config.queueOldestWaitAlertMs ?? 60_000,
@@ -199,6 +202,7 @@ const healthService = new HealthService(
     readinessCacheTtlMs: config.healthReadinessCacheTtlMs ?? 1_000
   }
 );
+const deploymentGateService = new DeploymentGateService(imageTaskQueue, billingEventsRepository);
 
 const server = createServer(
   createAppRequestHandler(config, {
@@ -216,7 +220,8 @@ const server = createServer(
     stylePresetService,
     promptOptimizationService,
     imageGenerationWorkerService,
-    healthService
+    healthService,
+    deploymentGateService
   })
 );
 

@@ -99,11 +99,7 @@ void test("图片修复从同代码多能力记录中选择 image_restore 能力
   );
   assert.ok(selected);
   assert.equal(
-    workbenchModes.isReferenceImageTaskModelCompatible(
-      selected,
-      "image_restore",
-      "1024x1024"
-    ),
+    workbenchModes.isReferenceImageTaskModelCompatible(selected, "image_restore", "1024x1024"),
     true
   );
 });
@@ -129,11 +125,7 @@ void test("明确不支持参考图或输出尺寸的修复模型被拒绝", () 
     false
   );
   assert.equal(
-    workbenchModes.isReferenceImageTaskModelCompatible(
-      wrongSize,
-      "image_restore",
-      "768x1024"
-    ),
+    workbenchModes.isReferenceImageTaskModelCompatible(wrongSize, "image_restore", "768x1024"),
     false
   );
 });

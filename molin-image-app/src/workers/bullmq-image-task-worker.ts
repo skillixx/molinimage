@@ -18,6 +18,11 @@ export interface BullMqImageTaskWorkerLogger {
   error(message: string): void;
 }
 
+export interface BullMqImageTaskWorkerOptions {
+  stalledIntervalMs?: number;
+  maxStalledCount?: number;
+}
+
 export class BullMqImageTaskWorker {
   private readonly worker: Worker<ImageTaskJobData, void, typeof IMAGE_TASK_JOB_NAME>;
 
@@ -27,7 +32,8 @@ export class BullMqImageTaskWorker {
     concurrency: number,
     lockDurationMs: number,
     processor: Pick<ImageTaskJobProcessor, "process">,
-    private readonly logger: BullMqImageTaskWorkerLogger = console
+    private readonly logger: BullMqImageTaskWorkerLogger = console,
+    options: BullMqImageTaskWorkerOptions = {}
   ) {
     this.worker = new Worker<ImageTaskJobData, void, typeof IMAGE_TASK_JOB_NAME>(
       queueName,
@@ -37,7 +43,14 @@ export class BullMqImageTaskWorker {
       {
         connection,
         concurrency,
-        lockDuration: lockDurationMs
+        lockDuration: lockDurationMs,
+        // 生产环境沿用 BullMQ 默认值；集成测试可缩短失联检测时间验证崩溃接管。
+        ...(options.stalledIntervalMs === undefined
+          ? {}
+          : { stalledInterval: options.stalledIntervalMs }),
+        ...(options.maxStalledCount === undefined
+          ? {}
+          : { maxStalledCount: options.maxStalledCount })
       }
     );
 

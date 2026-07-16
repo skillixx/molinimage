@@ -14,7 +14,10 @@ interface RestoreMode {
 interface RestoreModesModule {
   imageRestoreModes: RestoreMode[];
   createImageRestoreParameterValues(): Record<string, Record<string, unknown>>;
-  validateImageRestoreMode(mode: RestoreMode, hasAnnotations: boolean): {
+  validateImageRestoreMode(
+    mode: RestoreMode,
+    hasAnnotations: boolean
+  ): {
     valid: boolean;
     message: string;
   };

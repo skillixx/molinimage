@@ -78,7 +78,7 @@ Redis / BullMQ
 | G06  | API 和前端异步化             | 已完成 | G05       |
 | G07  | 重试、恢复和死信处理         | 已完成 | G06       |
 | G08  | 健康检查、监控与管理能力     | 已完成 | G07       |
-| G09  | 集成测试、灰度切换和部署验收 | 待执行 | G08       |
+| G09  | 集成测试、灰度切换和部署验收 | 已完成 | G08       |
 
 状态只能使用：`待执行`、`执行中`、`已完成`、`阻塞`。
 
@@ -570,6 +570,18 @@ npm test
 ```
 
 还必须执行真实 Redis 集成测试、API/Worker 重启测试和多实例 Session 测试。只通过单元测试不能判定本计划完成。
+
+### 实施结果
+
+- 已新增 `npm run test:integration` 与 `npm run acceptance`，串行执行真实 Redis Session、两个独立 API 子进程、MySQL Outbox、BullMQ 多 Worker 和健康探针测试。
+- 两个独立 Node API 进程已验证共享 Redis Session；首个实例退出并重启后，原 Cookie 仍可读取当前用户。
+- 真实 BullMQ 集成测试已覆盖独立子进程领取 Job 后被强制终止、另一 Worker 在锁过期后接管、重复 Job 只执行一次、过期数据库租约恢复和优雅停机。
+- 真实 MySQL 与 Redis 集成测试已通过 TCP 故障代理切断同一 BullMQ 连接；中断时 Outbox 保留失败状态，恢复后由原 Dispatcher 自动补投。
+- 可控 Fake AI Gateway 已在真实 MySQL 与 BullMQ 链路验证临时错误重试、永久错误只释放一次积分，以及结算失败进入 `billing_pending`。
+- 已新增 `npm run validate:deployment`，校验远端实际运行模式只能使用 `SESSION_STORE=redis` 和 `IMAGE_TASK_EXECUTION_MODE=queue`，并要求 API、MySQL、Redis、MinIO、队列和 Worker readiness 就绪、队列与 Outbox 排空。目标 API 通过令牌保护的内部门禁从自身使用的 MySQL 与 Redis 聚合待对账、孤立预占和 failed Job ID 集合摘要，避免本地门禁误查其他实例。
+- 灰度步骤、发布门禁、回滚顺序、对账要求和禁止操作已固化到 `docs/g09-deployment-acceptance.md`。
+- 当前 5199 实例已按 production + Redis Session + queue 模式启动 API 与独立 Worker，部署后 readiness 返回全部依赖与 Worker 为 `ok`，队列和 Outbox 无积压或死信。
+- 最终 `npm run acceptance` 通过常规测试 268 项（261 通过、7 项按真实依赖分组跳过），随后真实 MySQL、Redis、MinIO、BullMQ、Worker 与多实例 Session 集成测试 7/7 通过；只读标准与规格评审均无 P0/P1 阻断。
 
 ## 16. 商业化完成定义
 
