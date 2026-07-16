@@ -74,6 +74,43 @@ void test("风格模板服务支持编辑名称、分类、prompt、预览图、
   assert.equal(updated.preset.sort_order, 5);
 });
 
+void test("风格模板服务按文生图、图生图和图片修复任务类型分别过滤", async () => {
+  const repository = new InMemoryStylePresetsRepository();
+  const service = new StylePresetService(repository);
+
+  await service.createPreset({
+    name: "小红书封面",
+    category: "social",
+    taskType: "text_to_image",
+    promptTemplate: "小红书封面风格"
+  });
+  await service.createPreset({
+    name: "换服装",
+    category: "portrait",
+    taskType: "image_to_image",
+    promptTemplate: "保持人物身份，只调整服装"
+  });
+  await service.createPreset({
+    name: "人像增强",
+    category: "portrait",
+    taskType: "image_restore",
+    promptTemplate: "保持人物身份并增强清晰度"
+  });
+
+  assert.deepEqual(
+    (await service.listVisiblePresets("text_to_image")).items.map((item) => item.name),
+    ["小红书封面"]
+  );
+  assert.deepEqual(
+    (await service.listVisiblePresets("image_to_image")).items.map((item) => item.name),
+    ["换服装"]
+  );
+  assert.deepEqual(
+    (await service.listVisiblePresets("image_restore")).items.map((item) => item.name),
+    ["人像增强"]
+  );
+});
+
 void test("风格模板预览图 URL 必须是 http 或 https", async () => {
   const service = new StylePresetService(new InMemoryStylePresetsRepository());
 

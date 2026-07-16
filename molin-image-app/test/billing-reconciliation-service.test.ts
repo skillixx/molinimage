@@ -279,6 +279,7 @@ function createImageTask(
   return {
     id,
     source_task_id: null,
+    source_file_id: null,
     owner_user_id: 479,
     entitlement_id: 62,
     task_type: "text_to_image",

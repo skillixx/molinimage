@@ -9,23 +9,29 @@
     "dev:worker": "tsx watch src/workers/image-task-worker.ts",
     "db:migrate": "tsx scripts/migrate.ts up",
     "db:rollback": "tsx scripts/migrate.ts down",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsx scripts/clean-dist.ts && tsc -p tsconfig.json",
     "lint": "eslint .",
     "format": "prettier . --write",
     "format:check": "prettier . --check",
     "start": "node dist/src/app/server.js",
     "start:worker": "node dist/src/workers/image-task-worker.js",
     "test": "node --test dist/test/**/*.test.js",
+    "test:integration": "npm run build && tsx scripts/run-g09-integration-tests.ts",
+    "validate:deployment": "tsx scripts/validate-g09-deployment.ts",
+    "acceptance": "npm run build && npm run lint && npm run format:check && npm test && tsx scripts/run-g09-integration-tests.ts",
     "test:watch": "node --test --watch dist/test/**/*.test.js"
   },
   "engines": {
     "node": ">=20.0.0"
   },
   "dependencies": {
+    "bullmq": "^5.80.5",
     "dotenv": "^17.4.2",
     "image-size": "^2.0.2",
+    "ioredis": "^5.11.1",
     "minio": "^8.0.7",
-    "mysql2": "^3.22.6"
+    "mysql2": "^3.22.6",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

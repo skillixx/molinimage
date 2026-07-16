@@ -5,6 +5,7 @@ import type {
   StylePresetRecord,
   StylePresetsRepository
 } from "../../infrastructure/database/style-presets-repository.js";
+import { supportsStylePreset } from "../image-tasks/image-task-types.js";
 
 export interface SaveStylePresetRequest {
   name: string;
@@ -27,8 +28,6 @@ export class StylePresetServiceError extends Error {
     this.name = "StylePresetServiceError";
   }
 }
-
-const supportedTaskTypes = new Set(["text_to_image", "image_to_image", "image_restore"]);
 
 export class StylePresetService {
   constructor(private readonly repository: StylePresetsRepository) {}
@@ -131,7 +130,7 @@ function normalizeTaskType(value: string, field: string): string {
   const normalized = normalizeRequiredString(value, field);
 
   // 只允许图片应用已经支持的任务类型，避免管理端误建无法被 worker 消费的模板。
-  if (!supportedTaskTypes.has(normalized)) {
+  if (!supportsStylePreset(normalized)) {
     throw new StylePresetServiceError(
       "STYLE_PRESET_TASK_TYPE_UNSUPPORTED",
       "模板任务类型不支持。",

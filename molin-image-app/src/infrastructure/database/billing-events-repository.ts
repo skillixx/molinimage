@@ -32,6 +32,11 @@ export interface BillingEventSummaryRecord {
   record_count: number;
 }
 
+export interface BillingDeploymentGateSnapshot {
+  pending_count: number;
+  orphan_reserve_count: number;
+}
+
 export interface CreateReservedBillingEventInput {
   id: string;
   owner_user_id: number;
@@ -110,6 +115,10 @@ export interface BillingEventsRepository {
 interface BillingEventRow extends RowDataPacket, BillingEventRecord {}
 interface BillingEventWithTaskRow extends RowDataPacket, BillingEventWithTaskRecord {}
 interface BillingEventSummaryRow extends RowDataPacket, BillingEventSummaryRecord {}
+interface BillingDeploymentGateRow extends RowDataPacket {
+  pending_count: number | string | null;
+  orphan_reserve_count: number | string | null;
+}
 
 export class MySqlBillingEventsRepository implements BillingEventsRepository {
   constructor(private readonly pool: Pool) {}
@@ -458,6 +467,37 @@ export class MySqlBillingEventsRepository implements BillingEventsRepository {
         record_count: 0
       }
     );
+  }
+
+  async getDeploymentGateSnapshot(): Promise<BillingDeploymentGateSnapshot> {
+    const [rows] = await this.pool.execute<BillingDeploymentGateRow[]>(
+      `SELECT
+         SUM(CASE
+           WHEN reserve_event.status IN ('settle_pending', 'release_pending', 'settling', 'releasing')
+           THEN 1 ELSE 0
+         END) AS pending_count,
+         SUM(CASE
+           WHEN reserve_event.event_type = 'reserve'
+            AND reserve_event.status = 'reserved'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM billing_events terminal
+              WHERE terminal.task_id = reserve_event.task_id
+                AND terminal.owner_user_id = reserve_event.owner_user_id
+                AND (
+                  (terminal.event_type = 'settle' AND terminal.status = 'settled')
+                  OR (terminal.event_type = 'release' AND terminal.status = 'released')
+                )
+            )
+           THEN 1 ELSE 0
+         END) AS orphan_reserve_count
+       FROM billing_events reserve_event`
+    );
+
+    return {
+      pending_count: Number(rows[0]?.pending_count ?? 0),
+      orphan_reserve_count: Number(rows[0]?.orphan_reserve_count ?? 0)
+    };
   }
 }
 

@@ -28,25 +28,36 @@ import type {
   ImageTaskStatus
 } from "../modules/image-tasks/image-task-service.js";
 import { ImageTaskServiceError } from "../modules/image-tasks/image-task-service.js";
+import type { ImageTaskRecoveryService } from "../modules/image-tasks/image-task-recovery-service.js";
+import { ImageTaskRecoveryServiceError } from "../modules/image-tasks/image-task-recovery-service.js";
 import { RiskControlServiceError } from "../modules/risk-control/risk-control-service.js";
 import type { ImageModelService } from "../modules/image-models/image-model-service.js";
 import { ImageModelServiceError } from "../modules/image-models/image-model-service.js";
+import type { PromptOptimizationService } from "../modules/prompts/prompt-optimization-service.js";
+import { PromptOptimizationServiceError } from "../modules/prompts/prompt-optimization-service.js";
 import {
   MolingTicketError,
   type LaunchTicketVerifier
 } from "../infrastructure/moling/moling-client.js";
-import { createHealthResponse } from "../modules/health/health.service.js";
+import {
+  createHealthResponse,
+  type HealthService,
+  type ReadinessResponse
+} from "../modules/health/health.service.js";
+import type { DeploymentGateService } from "../modules/health/deployment-gate.service.js";
 import type { ImageGenerationWorkerService } from "../workers/image-generation-worker-service.js";
 import {
-  InMemorySessionStore,
   readCookie,
+  SessionStoreError,
   serializeExpiredSessionCookie,
-  serializeSessionCookie
+  serializeSessionCookie,
+  type ApplicationSession,
+  type SessionStore
 } from "../modules/auth/session-store.js";
 
 export interface AppDependencies {
   launchTicketVerifier: LaunchTicketVerifier;
-  sessionStore?: InMemorySessionStore;
+  sessionStore: SessionStore;
   fileService?: Pick<
     FileService,
     | "uploadFile"
@@ -75,19 +86,21 @@ export interface AppDependencies {
     BillingReconciliationService,
     "listPending" | "retryRelease" | "retrySettle"
   >;
+  imageTaskRecoveryService?: Pick<ImageTaskRecoveryService, "listFailedTasks" | "replayFailedTask">;
   pricingRuleService?: Pick<PricingRuleService, "listRules" | "createRule" | "updateRule">;
   stylePresetService?: Pick<
     StylePresetService,
     "createPreset" | "listManagedPresets" | "listVisiblePresets" | "updatePreset"
   >;
+  promptOptimizationService?: Pick<PromptOptimizationService, "optimizePrompt">;
   imageGenerationWorkerService?: Pick<ImageGenerationWorkerService, "processTask">;
+  healthService?: Pick<HealthService, "getLiveness" | "getReadiness">;
+  deploymentGateService?: Pick<DeploymentGateService, "getSnapshot">;
 }
 
 export function createAppRequestHandler(config: AppConfig, dependencies: AppDependencies) {
-  const sessionStore = dependencies.sessionStore ?? new InMemorySessionStore();
-
   return (request: IncomingMessage, response: ServerResponse): void => {
-    void handleRequest(request, response, config, dependencies, sessionStore);
+    void handleRequest(request, response, config, dependencies, dependencies.sessionStore);
   };
 }
 
@@ -96,14 +109,62 @@ async function handleRequest(
   response: ServerResponse,
   config: AppConfig,
   dependencies: AppDependencies,
-  sessionStore: InMemorySessionStore
+  sessionStore: SessionStore
 ): Promise<void> {
   const requestId = randomUUID();
   const url = new URL(request.url ?? "/", config.appBaseUrl);
   const sessionToken = readCookie(request, config.sessionCookieName);
-  const session = sessionStore.getSession(sessionToken);
-
   response.setHeader("X-Request-Id", requestId);
+  let session: ApplicationSession | undefined;
+
+  if (request.method === "GET" && isLivenessPath(url.pathname)) {
+    // 存活检查必须在 Session 读取之前返回，Redis Session 故障不能让编排系统误杀仍存活的进程。
+    writeJson(response, 200, dependencies.healthService?.getLiveness() ?? createHealthResponse());
+    return;
+  }
+
+  if (request.method === "GET" && isReadinessPath(url.pathname)) {
+    const readiness =
+      (await dependencies.healthService?.getReadiness()) ?? createFallbackReadinessResponse();
+    writeJson(response, readiness.status === "error" ? 503 : 200, readiness);
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/internal/deployment/gate") {
+    if (
+      config.deploymentGateToken === undefined ||
+      !hasValidInternalToken(request, config.deploymentGateToken)
+    ) {
+      writeError(response, 401, requestId, "INTERNAL_UNAUTHORIZED", "内部接口令牌无效。");
+      return;
+    }
+
+    if (dependencies.deploymentGateService === undefined) {
+      writeError(response, 503, requestId, "DEPLOYMENT_GATE_UNAVAILABLE", "部署门禁暂不可用。");
+      return;
+    }
+
+    try {
+      writeJson(response, 200, await dependencies.deploymentGateService.getSnapshot());
+    } catch {
+      // 内部接口同样不能透出 Redis、MySQL 原始错误或连接信息。
+      writeError(response, 503, requestId, "DEPLOYMENT_GATE_UNAVAILABLE", "部署门禁暂不可用。");
+    }
+    return;
+  }
+
+  try {
+    // 鉴权只依赖异步 SessionStore 契约；Redis 故障必须中止请求，禁止静默降级为未登录。
+    session = await sessionStore.getSession(sessionToken);
+  } catch (error: unknown) {
+    if (error instanceof SessionStoreError) {
+      writeSessionStoreUnavailable(response, requestId);
+      return;
+    }
+
+    writeSessionStoreUnavailable(response, requestId);
+    return;
+  }
 
   if (request.method === "GET" && url.pathname === "/admin/pricing") {
     if (session === undefined) {
@@ -165,6 +226,22 @@ async function handleRequest(
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/admin/task-recovery") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    // 恢复页面包含全体用户的失败任务和计费状态，只允许管理员白名单访问。
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有任务恢复管理权限。");
+      return;
+    }
+
+    await servePublicFile(response, requestId, "admin-task-recovery.html");
+    return;
+  }
+
   if (
     request.method === "GET" &&
     (url.pathname === "/" || url.pathname === "/enter" || url.pathname === "/auth/launch")
@@ -209,11 +286,6 @@ async function handleRequest(
 
   if (request.method === "GET" && url.pathname.startsWith("/assets/")) {
     await servePublicFile(response, requestId, url.pathname.slice(1));
-    return;
-  }
-
-  if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/api/health")) {
-    writeJson(response, 200, createHealthResponse());
     return;
   }
 
@@ -371,6 +443,33 @@ async function handleRequest(
     }
 
     await handleImageModels(response, requestId, session.user_id, dependencies.imageModelService);
+    return;
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/image/prompts/optimize") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    if (dependencies.promptOptimizationService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "PROMPT_OPTIMIZATION_SERVICE_UNAVAILABLE",
+        "提示词优化服务暂不可用。"
+      );
+      return;
+    }
+
+    await handlePromptOptimize(
+      request,
+      response,
+      requestId,
+      session.user_id,
+      dependencies.promptOptimizationService
+    );
     return;
   }
 
@@ -699,6 +798,75 @@ async function handleRequest(
     return;
   }
 
+  if (request.method === "GET" && url.pathname === "/api/admin/image/task-recovery") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    // 失败列表跨用户查询，必须先通过应用会话和管理员白名单双重校验。
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有任务恢复管理权限。");
+      return;
+    }
+
+    if (dependencies.imageTaskRecoveryService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "IMAGE_TASK_RECOVERY_SERVICE_UNAVAILABLE",
+        "任务恢复管理服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleImageTaskFailureList(
+      url,
+      response,
+      requestId,
+      dependencies.imageTaskRecoveryService
+    );
+    return;
+  }
+
+  const imageTaskReplayMatch = /^\/api\/admin\/image\/task-recovery\/([^/]+)\/replay$/u.exec(
+    url.pathname
+  );
+
+  if (request.method === "POST" && imageTaskReplayMatch !== null) {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    // 人工重投会重新预占积分，禁止普通用户绕过自己的任务重试入口调用。
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有任务恢复管理权限。");
+      return;
+    }
+
+    if (dependencies.imageTaskRecoveryService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "IMAGE_TASK_RECOVERY_SERVICE_UNAVAILABLE",
+        "任务恢复管理服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleImageTaskReplay(
+      response,
+      requestId,
+      session.user_id,
+      decodeURIComponent(imageTaskReplayMatch[1]),
+      dependencies.imageTaskRecoveryService
+    );
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/api/files") {
     if (session === undefined) {
       writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
@@ -977,11 +1145,19 @@ async function handleRequest(
   }
 
   if (request.method === "POST" && url.pathname === "/api/auth/logout") {
-    sessionStore.deleteSession(sessionToken);
     response.setHeader(
       "Set-Cookie",
       serializeExpiredSessionCookie(config.sessionCookieName, config.sessionCookieSecure)
     );
+
+    try {
+      await sessionStore.deleteSession(sessionToken);
+    } catch {
+      // 即使 Redis 删除失败也立即清除浏览器 Cookie，同时明确告知服务暂不可用。
+      writeSessionStoreUnavailable(response, requestId);
+      return;
+    }
+
     writeJson(response, 200, { ok: true });
     return;
   }
@@ -1030,6 +1206,7 @@ async function handleCreateImageTask(
       imageCount: readOptionalNumberField(body, "image_count"),
       upscaleFactor: readOptionalNumberField(body, "upscale_factor"),
       sourceTaskId: readOptionalStringField(body, "source_task_id"),
+      sourceFileId: readOptionalStringField(body, "source_file_id"),
       expectedPricingRuleId: readNullableStringField(body, "expected_price_rule_id"),
       expectedPoints: readOptionalStringField(body, "expected_points"),
       idempotencyKey:
@@ -1038,6 +1215,13 @@ async function handleCreateImageTask(
       requestIp: getClientIp(request, config.trustProxy),
       entitlementId
     });
+
+    if (config.imageTaskExecutionMode === "queue") {
+      // queue 模式只提交 MySQL 任务与 Outbox，禁止在 API 请求内直接调用模型。
+      // 任务提交成功后直接返回事务结果，预览服务故障不能把已入队任务伪装成创建失败。
+      writeJson(response, 202, result);
+      return;
+    }
 
     if (taskType === "text_to_image" && imageGenerationWorkerService !== undefined) {
       // P2 阶段先使用进程内 worker 处理单个任务；后续接 Redis 后复用同一个 processTask。
@@ -1277,6 +1461,15 @@ async function handleRetryImageTask(
       { requestId, requestIp: getClientIp(request, config.trustProxy) }
     );
 
+    if (config.imageTaskExecutionMode === "queue") {
+      // 重试同样只创建新任务与 Outbox，模型执行由后续独立 Worker 负责。
+      writeJson(response, 202, {
+        ...retryResult,
+        retried_from_task_id: retryResult.retried_from_task_id
+      });
+      return;
+    }
+
     if (imageGenerationWorkerService !== undefined) {
       // P2 阶段沿用进程内 worker；后续接 Redis 后这里只需要返回新 task 并由队列异步处理。
       const processedResult = await imageGenerationWorkerService.processTask(retryResult.task.id);
@@ -1486,6 +1679,38 @@ async function handleBillingReconciliationAction(
   }
 }
 
+async function handleImageTaskFailureList(
+  url: URL,
+  response: ServerResponse,
+  requestId: string,
+  recoveryService: Pick<ImageTaskRecoveryService, "listFailedTasks">
+): Promise<void> {
+  try {
+    const result = await recoveryService.listFailedTasks({
+      page: readPositiveIntegerQuery(url, "page", 1),
+      pageSize: readPositiveIntegerQuery(url, "page_size", 20)
+    });
+    writeJson(response, 200, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+async function handleImageTaskReplay(
+  response: ServerResponse,
+  requestId: string,
+  actorUserId: number,
+  taskId: string,
+  recoveryService: Pick<ImageTaskRecoveryService, "replayFailedTask">
+): Promise<void> {
+  try {
+    const result = await recoveryService.replayFailedTask({ taskId, actorUserId, requestId });
+    writeJson(response, 201, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
 async function handleFileUpload(
   request: IncomingMessage,
   response: ServerResponse,
@@ -1529,6 +1754,28 @@ async function handleImageModels(
       message: "当前暂无可用图片模型，请检查 IMAGE_MODEL_CATALOG_JSON 或稍后再试。",
       source: "env"
     });
+  }
+}
+
+async function handlePromptOptimize(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requestId: string,
+  ownerUserId: number,
+  promptOptimizationService: Pick<PromptOptimizationService, "optimizePrompt">
+): Promise<void> {
+  try {
+    const body = await readJsonBody(request);
+    const result = await promptOptimizationService.optimizePrompt({
+      ownerUserId,
+      prompt: readStringField(body, "prompt"),
+      taskType: readOptionalStringField(body, "task_type")
+    });
+
+    writeJson(response, 200, result);
+  } catch (error: unknown) {
+    void requestId;
+    writePublicError(response, requestId, error);
   }
 }
 
@@ -1790,7 +2037,7 @@ async function handleLaunch(
   requestId: string,
   config: AppConfig,
   launchTicketVerifier: LaunchTicketVerifier,
-  sessionStore: InMemorySessionStore
+  sessionStore: SessionStore
 ): Promise<void> {
   const ticket = url.searchParams.get("ticket")?.trim();
 
@@ -1814,7 +2061,7 @@ async function handleLaunch(
       return;
     }
 
-    const createdSession = sessionStore.createSession(identity, config.sessionTtlSeconds);
+    const createdSession = await sessionStore.createSession(identity, config.sessionTtlSeconds);
 
     response.statusCode = 302;
     response.setHeader("Location", "/");
@@ -1829,6 +2076,11 @@ async function handleLaunch(
     );
     response.end();
   } catch (error: unknown) {
+    if (error instanceof SessionStoreError) {
+      writeSessionStoreUnavailable(response, requestId);
+      return;
+    }
+
     if (error instanceof MolingTicketError) {
       const statusCode = error.code === "LAUNCH_TICKET_INVALID" ? 401 : 502;
       writeError(response, statusCode, requestId, error.code, error.message);
@@ -1917,6 +2169,17 @@ function writeError(
   });
 }
 
+function writeSessionStoreUnavailable(response: ServerResponse, requestId: string): void {
+  // 对外只返回稳定错误码和中文提示，不透出 Redis URL、驱动错误或 Session Token。
+  writeError(
+    response,
+    503,
+    requestId,
+    "SESSION_STORE_UNAVAILABLE",
+    "会话服务暂不可用，请稍后重试。"
+  );
+}
+
 function writePublicError(response: ServerResponse, requestId: string, error: unknown): void {
   if (error instanceof FileServiceError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
@@ -1924,6 +2187,11 @@ function writePublicError(response: ServerResponse, requestId: string, error: un
   }
 
   if (error instanceof ImageTaskServiceError) {
+    writeError(response, error.statusCode, requestId, error.code, error.message);
+    return;
+  }
+
+  if (error instanceof ImageTaskRecoveryServiceError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
     return;
   }
@@ -1949,6 +2217,11 @@ function writePublicError(response: ServerResponse, requestId: string, error: un
   }
 
   if (error instanceof ImageModelServiceError) {
+    writeError(response, error.statusCode, requestId, error.code, error.message);
+    return;
+  }
+
+  if (error instanceof PromptOptimizationServiceError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
     return;
   }
@@ -2168,4 +2441,40 @@ function isAdminUser(userId: number, adminUserIds: number[] | undefined): boolea
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isLivenessPath(pathname: string): boolean {
+  return pathname === "/health/live" || pathname === "/api/health/live";
+}
+
+function isReadinessPath(pathname: string): boolean {
+  return (
+    pathname === "/health" ||
+    pathname === "/api/health" ||
+    pathname === "/health/ready" ||
+    pathname === "/api/health/ready"
+  );
+}
+
+function createFallbackReadinessResponse(): ReadinessResponse {
+  // 监控服务装配遗漏必须明确失败，不能把依赖未知的实例静默放入生产流量。
+  return {
+    status: "error",
+    service: "molin-image-app",
+    runtime: {
+      session_store: "memory",
+      image_task_execution_mode: "inline"
+    },
+    dependencies: { mysql: "error", redis: "error", minio: "error", queue: "error" },
+    worker: { status: "offline" },
+    queue: {
+      waiting: 0,
+      active: 0,
+      delayed: 0,
+      failed: 0,
+      oldest_wait_ms: 0
+    },
+    outbox: { backlog: 0, dead_letter: 0, oldest_wait_ms: 0 },
+    alerts: []
+  };
 }

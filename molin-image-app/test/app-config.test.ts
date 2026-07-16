@@ -5,8 +5,17 @@ import { ConfigError, loadAppConfig } from "../src/config/app-config.js";
 
 const completeEnv = {
   APP_BASE_URL: "https://molin-image.example.com",
+  APP_ENV: "test",
   DATABASE_URL: "mysql://user:password@127.0.0.1:3306/molin_image",
   REDIS_URL: "redis://127.0.0.1:6379/0",
+  REDIS_KEY_PREFIX: "molinimage",
+  REDIS_CONNECT_TIMEOUT_MS: "10000",
+  REDIS_COMMAND_TIMEOUT_MS: "5000",
+  REDIS_MAX_RETRIES_PER_REQUEST: "3",
+  IMAGE_TASK_QUEUE_NAME: "molinimage-image-tasks",
+  IMAGE_TASK_WORKER_CONCURRENCY: "2",
+  IMAGE_TASK_JOB_ATTEMPTS: "3",
+  IMAGE_TASK_JOB_TIMEOUT_MS: "120000",
   STORAGE_PROVIDER: "minio",
   STORAGE_ENDPOINT: "http://127.0.0.1:9000",
   STORAGE_BUCKET: "molin-image-dev",
@@ -31,6 +40,8 @@ const completeEnv = {
   RISK_CONTROL_DISABLED_CAPABILITIES: "upscale",
   TRUST_PROXY: "true",
   INTERNAL_API_TOKEN: "replace_with_internal_api_token",
+  DEPLOYMENT_GATE_TOKEN: "replace_with_deployment_gate_token",
+  SESSION_STORE: "redis",
   SESSION_COOKIE_NAME: "molinimage_session",
   SESSION_COOKIE_SECURE: "false",
   SESSION_TTL_SECONDS: "86400",
@@ -43,6 +54,29 @@ void test("配置完整时可以加载应用配置", () => {
     appBaseUrl: "https://molin-image.example.com",
     databaseUrl: "mysql://user:password@127.0.0.1:3306/molin_image",
     redisUrl: "redis://127.0.0.1:6379/0",
+    redisKeyPrefix: "molinimage:test",
+    redisConnectTimeoutMs: 10000,
+    redisCommandTimeoutMs: 5000,
+    redisMaxRetriesPerRequest: 3,
+    imageTaskQueueName: "molinimage-image-tasks",
+    imageTaskWorkerConcurrency: 2,
+    imageTaskJobAttempts: 3,
+    imageTaskJobTimeoutMs: 120000,
+    imageTaskRecoveryScanIntervalMs: 30000,
+    imageTaskStuckAfterMs: 300000,
+    imageTaskRecoveryBatchSize: 50,
+    workerHeartbeatIntervalMs: 5000,
+    workerHeartbeatTtlSeconds: 15,
+    queueBacklogAlertThreshold: 20,
+    queueOldestWaitAlertMs: 60000,
+    outboxBacklogAlertThreshold: 10,
+    healthProbeTimeoutMs: 5000,
+    healthReadinessCacheTtlMs: 1000,
+    imageTaskExecutionMode: "inline",
+    imageTaskOutboxPollIntervalMs: 1000,
+    imageTaskOutboxBatchSize: 20,
+    imageTaskOutboxMaxWaitMs: 300000,
+    imageTaskOutboxMaxBackoffMs: 60000,
     storageProvider: "minio",
     storageEndpoint: "http://127.0.0.1:9000",
     storageBucket: "molin-image-dev",
@@ -67,12 +101,25 @@ void test("配置完整时可以加载应用配置", () => {
     riskControlDisabledCapabilities: ["upscale"],
     trustProxy: true,
     internalApiToken: "replace_with_internal_api_token",
+    deploymentGateToken: "replace_with_deployment_gate_token",
     adminUserIds: [],
+    sessionStore: "redis",
     sessionCookieName: "molinimage_session",
     sessionCookieSecure: false,
     sessionTtlSeconds: 86400,
     port: 3100
   });
+});
+
+void test("部署门禁令牌不能复用高权限内部令牌", () => {
+  assert.throws(
+    () =>
+      loadAppConfig({
+        ...completeEnv,
+        DEPLOYMENT_GATE_TOKEN: completeEnv.INTERNAL_API_TOKEN
+      }),
+    /DEPLOYMENT_GATE_TOKEN 必须与 INTERNAL_API_TOKEN 使用不同值/
+  );
 });
 
 void test("风控限额不允许配置为负数", () => {
@@ -112,4 +159,68 @@ void test("管理员用户白名单支持多个墨灵用户 ID", () => {
   const config = loadAppConfig({ ...completeEnv, MOLINIMAGE_ADMIN_USER_IDS: "696,479" });
 
   assert.deepEqual(config.adminUserIds, [696, 479]);
+});
+
+void test("Redis 配置按环境生成隔离前缀并校验队列参数", () => {
+  const productionConfig = loadAppConfig({
+    ...completeEnv,
+    APP_ENV: "production",
+    REDIS_KEY_PREFIX: "molinimage"
+  });
+
+  assert.equal(productionConfig.redisKeyPrefix, "molinimage:production");
+  assert.notEqual(productionConfig.redisKeyPrefix, loadAppConfig(completeEnv).redisKeyPrefix);
+  assert.throws(
+    () => loadAppConfig({ ...completeEnv, IMAGE_TASK_WORKER_CONCURRENCY: "0" }),
+    /IMAGE_TASK_WORKER_CONCURRENCY 必须是正整数/
+  );
+});
+
+void test("SessionStore 支持本地灰度但生产环境强制 Redis", () => {
+  const localConfig = loadAppConfig({ ...completeEnv, APP_ENV: "development", SESSION_STORE: "" });
+  const productionConfig = loadAppConfig({
+    ...completeEnv,
+    APP_ENV: "production",
+    SESSION_STORE: ""
+  });
+
+  assert.equal(localConfig.sessionStore, "memory");
+  assert.equal(productionConfig.sessionStore, "redis");
+  assert.throws(
+    () => loadAppConfig({ ...completeEnv, APP_ENV: "production", SESSION_STORE: "memory" }),
+    /生产环境 SESSION_STORE 必须配置为 redis/
+  );
+  assert.throws(
+    () => loadAppConfig({ ...completeEnv, SESSION_STORE: "filesystem" }),
+    /SESSION_STORE 只能填写 memory 或 redis/
+  );
+});
+
+void test("任务执行模式支持本地灰度但生产环境强制队列", () => {
+  const localConfig = loadAppConfig({
+    ...completeEnv,
+    APP_ENV: "development",
+    IMAGE_TASK_EXECUTION_MODE: ""
+  });
+  const productionConfig = loadAppConfig({
+    ...completeEnv,
+    APP_ENV: "production",
+    IMAGE_TASK_EXECUTION_MODE: ""
+  });
+
+  assert.equal(localConfig.imageTaskExecutionMode, "inline");
+  assert.equal(productionConfig.imageTaskExecutionMode, "queue");
+  assert.throws(
+    () =>
+      loadAppConfig({
+        ...completeEnv,
+        APP_ENV: "production",
+        IMAGE_TASK_EXECUTION_MODE: "inline"
+      }),
+    /生产环境 IMAGE_TASK_EXECUTION_MODE 必须配置为 queue/
+  );
+  assert.throws(
+    () => loadAppConfig({ ...completeEnv, IMAGE_TASK_EXECUTION_MODE: "thread" }),
+    /IMAGE_TASK_EXECUTION_MODE 只能填写 inline 或 queue/
+  );
 });

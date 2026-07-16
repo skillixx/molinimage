@@ -1,4 +1,4 @@
-import type { Pool, ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 export type ImageTaskStatus =
   | "pending"
@@ -13,6 +13,7 @@ export type ImageTaskStatus =
 export interface ImageTaskRecord {
   id: string;
   source_task_id: string | null;
+  source_file_id: string | null;
   owner_user_id: number;
   entitlement_id: number | null;
   task_type: string;
@@ -35,15 +36,24 @@ export interface ImageTaskRecord {
   idempotency_key: string;
   error_code: string | null;
   error_message: string | null;
+  worker_lock_token?: string | null;
+  worker_lock_expires_at?: string | null;
+  worker_started_at?: string | null;
+  worker_attempt_count?: number;
   is_favorited: boolean;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
 }
 
+export interface FailedImageTaskRecord extends ImageTaskRecord {
+  billing_status: string | null;
+}
+
 export interface CreateImageTaskRecordInput {
   id: string;
   source_task_id?: string | null;
+  source_file_id?: string | null;
   owner_user_id: number;
   entitlement_id?: number | null;
   task_type: string;
@@ -74,6 +84,42 @@ export interface TransitionImageTaskInput {
   billingEventId?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
+  workerLockToken?: string;
+}
+
+export interface ClaimImageTaskExecutionInput {
+  taskId: string;
+  lockToken: string;
+  lockDurationMs: number;
+}
+
+export interface ClaimStuckTaskFinalizationInput {
+  taskId: string;
+  lockToken: string;
+  lockDurationMs: number;
+  staleAfterMs: number;
+  maxAttempts: number;
+}
+
+export interface ImageTaskExecutionClaim {
+  task: ImageTaskRecord;
+  lock_token: string;
+}
+
+export interface RecordImageTaskOutputInput {
+  taskId: string;
+  ownerUserId: number;
+  fileId: string;
+  gatewayRequestId: string;
+  workerLockToken?: string;
+}
+
+export interface UpdateFailedImageTaskReasonInput {
+  taskId: string;
+  ownerUserId: number;
+  expectedErrorCode: string;
+  errorCode: string;
+  errorMessage: string;
 }
 
 export interface ImageTasksRepository {
@@ -86,6 +132,18 @@ export interface ImageTasksRepository {
     page: number;
     pageSize: number;
   }): Promise<{ items: ImageTaskRecord[]; total: number }>;
+  findFailedTasks?(input: {
+    page: number;
+    pageSize: number;
+  }): Promise<{ items: FailedImageTaskRecord[]; total: number }>;
+  findRecoverableStuckTasks?(input: {
+    staleAfterMs: number;
+    limit: number;
+  }): Promise<ImageTaskRecord[]>;
+  recoverStuckExecution?(input: { taskId: string; staleAfterMs: number }): Promise<boolean>;
+  claimStuckTaskFinalization?(
+    input: ClaimStuckTaskFinalizationInput
+  ): Promise<ImageTaskExecutionClaim | undefined>;
   markFavorite(input: {
     ownerUserId: number;
     taskId: string;
@@ -96,11 +154,22 @@ export interface ImageTasksRepository {
     taskId: string;
   }): Promise<ImageTaskRecord | undefined>;
   updateStatus(input: TransitionImageTaskInput): Promise<ImageTaskRecord | undefined>;
+  claimExecution?(
+    input: ClaimImageTaskExecutionInput
+  ): Promise<ImageTaskExecutionClaim | undefined>;
+  renewExecution?(input: ClaimImageTaskExecutionInput): Promise<boolean>;
+  releaseExecution?(input: { taskId: string; lockToken: string }): Promise<boolean>;
+  isExecutionActive?(input: { taskId: string; lockToken: string }): Promise<boolean>;
+  recordOutputFile?(input: RecordImageTaskOutputInput): Promise<ImageTaskRecord | undefined>;
+  updateFailedReason?(
+    input: UpdateFailedImageTaskReasonInput
+  ): Promise<ImageTaskRecord | undefined>;
 }
 
 interface ImageTaskRow extends RowDataPacket {
   id: string;
   source_task_id: string | null;
+  source_file_id: string | null;
   owner_user_id: number;
   entitlement_id: number | null;
   task_type: string;
@@ -123,10 +192,18 @@ interface ImageTaskRow extends RowDataPacket {
   idempotency_key: string;
   error_code: string | null;
   error_message: string | null;
+  worker_lock_token?: string | null;
+  worker_lock_expires_at?: string | null;
+  worker_started_at?: string | null;
+  worker_attempt_count?: number;
   is_favorited: number | boolean;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface FailedImageTaskRow extends ImageTaskRow {
+  billing_status: string | null;
 }
 
 export class MySqlImageTasksRepository implements ImageTasksRepository {
@@ -134,52 +211,7 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
 
   async create(input: CreateImageTaskRecordInput): Promise<ImageTaskRecord> {
     try {
-      await this.pool.execute<ResultSetHeader>(
-        `INSERT INTO image_tasks (
-        id,
-        source_task_id,
-        owner_user_id,
-        entitlement_id,
-        task_type,
-        status,
-        prompt,
-        negative_prompt,
-        style_preset_id,
-        input_file_ids,
-        output_file_ids,
-        gateway_model_code,
-        gateway_capability,
-        quality,
-        image_size,
-        image_count,
-        upscale_factor,
-        cost_points,
-        billing_event_id,
-        idempotency_key
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          input.id,
-          input.source_task_id ?? null,
-          input.owner_user_id,
-          input.entitlement_id ?? null,
-          input.task_type,
-          input.status,
-          input.prompt,
-          input.negative_prompt,
-          input.style_preset_id,
-          JSON.stringify(input.input_file_ids),
-          JSON.stringify([]),
-          input.gateway_model_code,
-          input.gateway_capability,
-          input.quality,
-          input.image_size,
-          input.image_count,
-          input.upscale_factor ?? null,
-          input.cost_points,
-          input.billing_event_id,
-          input.idempotency_key
-        ]
-      );
+      await insertImageTaskRecord(this.pool, input);
     } catch (error: unknown) {
       const existingTask = await this.findByIdempotencyKey(input.idempotency_key);
 
@@ -256,6 +288,7 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
       `SELECT
         id,
         source_task_id,
+        source_file_id,
         owner_user_id,
         entitlement_id,
         task_type,
@@ -302,6 +335,126 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
       items: rows.map((row) => toImageTaskRecord(row)),
       total: countRows[0]?.total ?? 0
     };
+  }
+
+  async findFailedTasks(input: {
+    page: number;
+    pageSize: number;
+  }): Promise<{ items: FailedImageTaskRecord[]; total: number }> {
+    const offset = (input.page - 1) * input.pageSize;
+    const limitSql = formatSqlLimit(input.pageSize);
+    const offsetSql = formatSqlLimit(offset);
+    const [countRows] = await this.pool.execute<(RowDataPacket & { total: number })[]>(
+      "SELECT COUNT(*) AS total FROM image_tasks WHERE status = 'failed' AND deleted_at IS NULL"
+    );
+    const [rows] = await this.pool.execute<FailedImageTaskRow[]>(
+      `${imageTaskSelectSql}
+       WHERE image_tasks.status = 'failed'
+         AND image_tasks.deleted_at IS NULL
+       ORDER BY image_tasks.updated_at DESC, image_tasks.id DESC
+       LIMIT ${limitSql} OFFSET ${offsetSql}`
+    );
+
+    return {
+      items: rows.map((row) => ({ ...toImageTaskRecord(row), billing_status: row.billing_status })),
+      total: countRows[0]?.total ?? 0
+    };
+  }
+
+  async findRecoverableStuckTasks(input: {
+    staleAfterMs: number;
+    limit: number;
+  }): Promise<ImageTaskRecord[]> {
+    // queued 使用更新时间判定，running 使用数据库租约判定，避免把仍在合法执行的长任务误接管。
+    const staleMicroseconds = toDurationMicroseconds(input.staleAfterMs, "卡住任务判定时长");
+    const limitSql = formatSqlLimit(input.limit);
+    const [rows] = await this.pool.execute<ImageTaskRow[]>(
+      `${imageTaskSelectSql}
+       WHERE deleted_at IS NULL
+         AND (
+           (
+             status IN ('billing_reserved', 'queued')
+             AND updated_at <= TIMESTAMPADD(MICROSECOND, -?, CURRENT_TIMESTAMP(3))
+           )
+           OR (
+             status = 'running'
+             AND (worker_lock_expires_at IS NULL OR worker_lock_expires_at <= CURRENT_TIMESTAMP(3))
+           )
+         )
+       ORDER BY updated_at ASC, id ASC
+       LIMIT ${limitSql}`,
+      [staleMicroseconds]
+    );
+
+    return rows.map((row) => toImageTaskRecord(row));
+  }
+
+  async recoverStuckExecution(input: { taskId: string; staleAfterMs: number }): Promise<boolean> {
+    const staleMicroseconds = toDurationMicroseconds(input.staleAfterMs, "卡住任务判定时长");
+    // 条件更新同时承担并发栅栏：多个扫描器只有一个能刷新状态并获得重新投递资格。
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET status = 'queued',
+           worker_lock_token = NULL,
+           worker_lock_expires_at = NULL,
+           updated_at = CURRENT_TIMESTAMP(3)
+       WHERE id = ?
+         AND deleted_at IS NULL
+         AND (
+           (
+             status IN ('billing_reserved', 'queued')
+             AND updated_at <= TIMESTAMPADD(MICROSECOND, -?, CURRENT_TIMESTAMP(3))
+           )
+           OR (
+             status = 'running'
+             AND (worker_lock_expires_at IS NULL OR worker_lock_expires_at <= CURRENT_TIMESTAMP(3))
+           )
+         )`,
+      [input.taskId, staleMicroseconds]
+    );
+
+    return result.affectedRows === 1;
+  }
+
+  async claimStuckTaskFinalization(
+    input: ClaimStuckTaskFinalizationInput
+  ): Promise<ImageTaskExecutionClaim | undefined> {
+    const staleMicroseconds = toDurationMicroseconds(input.staleAfterMs, "卡住任务判定时长");
+    const lockMicroseconds = toDurationMicroseconds(input.lockDurationMs, "恢复终结租约时长");
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET status = 'running',
+           worker_lock_token = ?,
+           worker_lock_expires_at = TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(3)),
+           worker_started_at = COALESCE(worker_started_at, CURRENT_TIMESTAMP(3))
+       WHERE id = ?
+         AND deleted_at IS NULL
+         AND worker_attempt_count >= ?
+         AND (
+           (
+             status IN ('billing_reserved', 'queued')
+             AND updated_at <= TIMESTAMPADD(MICROSECOND, -?, CURRENT_TIMESTAMP(3))
+           )
+           OR (
+             status = 'running'
+             AND (worker_lock_expires_at IS NULL OR worker_lock_expires_at <= CURRENT_TIMESTAMP(3))
+           )
+         )`,
+      [input.lockToken, lockMicroseconds, input.taskId, input.maxAttempts, staleMicroseconds]
+    );
+
+    if (result.affectedRows !== 1) {
+      // 状态或租约被并发推进时终结者必须放弃，不能释放新 Worker 正在使用的积分预占。
+      return undefined;
+    }
+
+    const task = await this.findById(input.taskId);
+
+    if (task === undefined) {
+      throw new Error("恢复扫描器抢占最终失败任务后回读失败。");
+    }
+
+    return { task, lock_token: input.lockToken };
   }
 
   async markFavorite(input: {
@@ -360,6 +513,11 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
   }
 
   async updateStatus(input: TransitionImageTaskInput): Promise<ImageTaskRecord | undefined> {
+    const workerFenceSql = input.workerLockToken === undefined ? "" : "AND worker_lock_token = ?";
+    const clearWorkerLeaseSql =
+      input.workerLockToken === undefined
+        ? ""
+        : ", worker_lock_token = NULL, worker_lock_expires_at = NULL";
     const [result] = await this.pool.execute<ResultSetHeader>(
       `UPDATE image_tasks
        SET
@@ -370,9 +528,11 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
         billing_event_id = COALESCE(?, billing_event_id),
         error_code = ?,
         error_message = ?
+        ${clearWorkerLeaseSql}
        WHERE id = ?
         AND owner_user_id = ?
-        AND status = ?`,
+        AND status = ?
+        ${workerFenceSql}`,
       [
         input.toStatus,
         input.outputFileIds === undefined ? null : JSON.stringify(input.outputFileIds),
@@ -383,7 +543,8 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
         input.errorMessage ?? null,
         input.taskId,
         input.ownerUserId,
-        input.fromStatus
+        input.fromStatus,
+        ...(input.workerLockToken === undefined ? [] : [input.workerLockToken])
       ]
     );
 
@@ -394,6 +555,208 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
 
     return this.findById(input.taskId);
   }
+
+  async claimExecution(
+    input: ClaimImageTaskExecutionInput
+  ): Promise<ImageTaskExecutionClaim | undefined> {
+    const lockDurationMicroseconds = toDurationMicroseconds(
+      input.lockDurationMs,
+      "Worker 租约时长"
+    );
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET status = 'running',
+           worker_lock_token = ?,
+           worker_lock_expires_at = TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(3)),
+           worker_started_at = COALESCE(worker_started_at, CURRENT_TIMESTAMP(3)),
+           worker_attempt_count = worker_attempt_count + 1
+       WHERE id = ?
+         AND deleted_at IS NULL
+         AND (
+           status IN ('billing_reserved', 'queued')
+           OR (
+             status = 'running'
+             AND (worker_lock_expires_at IS NULL OR worker_lock_expires_at <= CURRENT_TIMESTAMP(3))
+           )
+         )`,
+      [input.lockToken, lockDurationMicroseconds, input.taskId]
+    );
+
+    if (result.affectedRows !== 1) {
+      // 终态任务、有效租约或不存在的任务都不再执行，重复 Job 在这里被幂等吸收。
+      return undefined;
+    }
+
+    const task = await this.findById(input.taskId);
+
+    if (task === undefined) {
+      throw new Error("Worker 抢占图片任务后回读失败");
+    }
+
+    return { task, lock_token: input.lockToken };
+  }
+
+  async renewExecution(input: ClaimImageTaskExecutionInput): Promise<boolean> {
+    const lockDurationMicroseconds = toDurationMicroseconds(
+      input.lockDurationMs,
+      "Worker 租约时长"
+    );
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET worker_lock_expires_at = TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(3))
+       WHERE id = ?
+         AND status = 'running'
+         AND worker_lock_token = ?
+         AND worker_lock_expires_at > CURRENT_TIMESTAMP(3)`,
+      [lockDurationMicroseconds, input.taskId, input.lockToken]
+    );
+
+    return result.affectedRows === 1;
+  }
+
+  async releaseExecution(input: { taskId: string; lockToken: string }): Promise<boolean> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET status = 'queued',
+           worker_lock_token = NULL,
+           worker_lock_expires_at = NULL
+       WHERE id = ?
+         AND status = 'running'
+         AND worker_lock_token = ?`,
+      [input.taskId, input.lockToken]
+    );
+
+    return result.affectedRows === 1;
+  }
+
+  async isExecutionActive(input: { taskId: string; lockToken: string }): Promise<boolean> {
+    const [rows] = await this.pool.execute<(RowDataPacket & { active: number })[]>(
+      `SELECT EXISTS(
+         SELECT 1
+         FROM image_tasks
+         WHERE id = ?
+           AND status = 'running'
+           AND worker_lock_token = ?
+           AND worker_lock_expires_at > CURRENT_TIMESTAMP(3)
+       ) AS active`,
+      [input.taskId, input.lockToken]
+    );
+
+    return rows[0]?.active === 1;
+  }
+
+  async recordOutputFile(input: RecordImageTaskOutputInput): Promise<ImageTaskRecord | undefined> {
+    const workerFenceSql = input.workerLockToken === undefined ? "" : "AND worker_lock_token = ?";
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET output_file_ids = CASE
+             WHEN JSON_CONTAINS(output_file_ids, JSON_QUOTE(?), '$') THEN output_file_ids
+             ELSE JSON_ARRAY_APPEND(output_file_ids, '$', ?)
+           END,
+           gateway_request_id = COALESCE(gateway_request_id, ?)
+       WHERE id = ?
+         AND owner_user_id = ?
+         AND status = 'running'
+         ${workerFenceSql}`,
+      [
+        input.fileId,
+        input.fileId,
+        input.gatewayRequestId,
+        input.taskId,
+        input.ownerUserId,
+        ...(input.workerLockToken === undefined ? [] : [input.workerLockToken])
+      ]
+    );
+
+    if (result.affectedRows !== 1) {
+      // 只有持有当前执行租约的 Worker 才能登记结果，过期 Worker 不能覆盖新执行者状态。
+      return undefined;
+    }
+
+    return await this.findById(input.taskId);
+  }
+
+  async updateFailedReason(
+    input: UpdateFailedImageTaskReasonInput
+  ): Promise<ImageTaskRecord | undefined> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET error_code = ?, error_message = ?
+       WHERE id = ?
+         AND owner_user_id = ?
+         AND status = 'failed'
+         AND error_code = ?`,
+      [
+        input.errorCode,
+        input.errorMessage,
+        input.taskId,
+        input.ownerUserId,
+        input.expectedErrorCode
+      ]
+    );
+
+    if (result.affectedRows !== 1) {
+      // 对账流程已并发修正状态时不覆盖其结果，调用方应回读当前任务。
+      return undefined;
+    }
+
+    return await this.findById(input.taskId);
+  }
+}
+
+export async function insertImageTaskRecord(
+  executor: Pool | PoolConnection,
+  input: CreateImageTaskRecordInput
+): Promise<void> {
+  // 该底层 INSERT 可复用于普通创建和 Outbox 事务，但不负责提交事务或吞掉唯一键冲突。
+  await executor.execute<ResultSetHeader>(
+    `INSERT INTO image_tasks (
+      id,
+      source_task_id,
+      source_file_id,
+      owner_user_id,
+      entitlement_id,
+      task_type,
+      status,
+      prompt,
+      negative_prompt,
+      style_preset_id,
+      input_file_ids,
+      output_file_ids,
+      gateway_model_code,
+      gateway_capability,
+      quality,
+      image_size,
+      image_count,
+      upscale_factor,
+      cost_points,
+      billing_event_id,
+      idempotency_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.id,
+      input.source_task_id ?? null,
+      input.source_file_id ?? null,
+      input.owner_user_id,
+      input.entitlement_id ?? null,
+      input.task_type,
+      input.status,
+      input.prompt,
+      input.negative_prompt,
+      input.style_preset_id,
+      JSON.stringify(input.input_file_ids),
+      JSON.stringify([]),
+      input.gateway_model_code,
+      input.gateway_capability,
+      input.quality,
+      input.image_size,
+      input.image_count,
+      input.upscale_factor ?? null,
+      input.cost_points,
+      input.billing_event_id,
+      input.idempotency_key
+    ]
+  );
 }
 
 function toImageTaskRecord(row: ImageTaskRow): ImageTaskRecord {
@@ -432,9 +795,22 @@ function formatSqlLimit(value: number): string {
   return String(value);
 }
 
+function toDurationMicroseconds(value: number, label: string): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > Math.floor(Number.MAX_SAFE_INTEGER / 1000)
+  ) {
+    throw new Error(`${label}必须是可转换为微秒的正整数。`);
+  }
+
+  return value * 1000;
+}
+
 const imageTaskSelectSql = `SELECT
   id,
   source_task_id,
+  source_file_id,
   owner_user_id,
   entitlement_id,
   task_type,
@@ -457,6 +833,17 @@ const imageTaskSelectSql = `SELECT
   idempotency_key,
   error_code,
   error_message,
+  worker_lock_token,
+  DATE_FORMAT(worker_lock_expires_at, '%Y-%m-%dT%H:%i:%s.%fZ') AS worker_lock_expires_at,
+  DATE_FORMAT(worker_started_at, '%Y-%m-%dT%H:%i:%s.%fZ') AS worker_started_at,
+  worker_attempt_count,
+  (
+    SELECT billing_events.status
+    FROM billing_events
+    WHERE billing_events.task_id = image_tasks.id
+    ORDER BY billing_events.created_at DESC, billing_events.id DESC
+    LIMIT 1
+  ) AS billing_status,
   EXISTS (
     SELECT 1
     FROM user_collections

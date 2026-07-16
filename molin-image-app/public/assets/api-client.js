@@ -19,6 +19,13 @@ export async function estimateBilling(input) {
   });
 }
 
+export async function optimizePrompt(input) {
+  return await requestJson("/api/image/prompts/optimize", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
 export async function getBillingBalance() {
   return await requestJson("/api/billing/balance");
 }
@@ -32,9 +39,13 @@ export async function getBillingRecords(page = 1, pageSize = 20) {
   return await requestJson(`/api/billing/records?${query.toString()}`);
 }
 
-export async function createImageTask(input) {
+export async function createImageTask(input, options = {}) {
   return await requestJson("/api/image/tasks", {
     method: "POST",
+    headers:
+      options.idempotencyKey === undefined
+        ? undefined
+        : { "idempotency-key": options.idempotencyKey },
     body: JSON.stringify(input)
   });
 }
@@ -56,10 +67,17 @@ export async function uploadImageFile(input) {
   });
 }
 
-export async function getImageHistory(taskType = "") {
-  const query = taskType.length > 0 ? `?task_type=${encodeURIComponent(taskType)}` : "";
+export async function getImageHistory(taskType = "", page = 1, pageSize = 12) {
+  const query = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize)
+  });
 
-  return await requestJson(`/api/image/history${query}`);
+  if (taskType.length > 0) {
+    query.set("task_type", taskType);
+  }
+
+  return await requestJson(`/api/image/history?${query.toString()}`);
 }
 
 export async function favoriteHistoryItem(taskId) {
@@ -81,7 +99,8 @@ async function requestJson(path, options = {}) {
     credentials: "same-origin",
     headers: {
       accept: "application/json",
-      ...(options.body === undefined ? {} : { "content-type": "application/json" })
+      ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+      ...(options.headers ?? {})
     },
     body: options.body
   });
@@ -93,6 +112,7 @@ async function requestJson(path, options = {}) {
 
     // 保留后端公开错误码，工作台可据此执行重新估价等安全恢复动作。
     error.code = payload?.error?.code ?? "REQUEST_FAILED";
+    error.status = response.status;
     throw error;
   }
 

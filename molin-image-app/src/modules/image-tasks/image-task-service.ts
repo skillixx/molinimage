@@ -1,6 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
+import type { ImageTaskCreationRepository } from "../../infrastructure/database/image-task-outbox-repository.js";
 import type {
+  CreateImageTaskRecordInput,
   ImageTaskRecord,
   ImageTasksRepository,
   ImageTaskStatus
@@ -11,6 +13,7 @@ import type {
   SettleBillingResult
 } from "../billing/billing-service.js";
 import type { RiskControlService } from "../risk-control/risk-control-service.js";
+import { isSupportedImageRestoreType, isSupportedImageTaskType } from "./image-task-types.js";
 
 export type { ImageTaskStatus };
 
@@ -28,6 +31,7 @@ export interface CreateImageTaskRequest {
   imageCount?: number;
   upscaleFactor?: number;
   sourceTaskId?: string;
+  sourceFileId?: string;
   idempotencyKey?: string;
   requestId?: string;
   requestIp?: string;
@@ -46,6 +50,24 @@ export interface TransitionImageTaskRequest {
   billingEventId?: string;
   errorCode?: string;
   errorMessage?: string;
+  /** 仅供独立 Worker 使用，防止过期执行者结算或覆盖新执行者结果。 */
+  workerLockToken?: string;
+}
+
+export interface RecordWorkerOutputRequest {
+  ownerUserId: number;
+  taskId: string;
+  fileId: string;
+  gatewayRequestId: string;
+  workerLockToken?: string;
+}
+
+export interface FinalizeClaimedFailureRequest {
+  ownerUserId: number;
+  taskId: string;
+  errorCode: string;
+  errorMessage: string;
+  workerLockToken: string;
 }
 
 export interface ImageTaskResult {
@@ -108,6 +130,7 @@ export interface ImageTaskStylePresetResolver {
 export interface PublicImageTask {
   id: string;
   source_task_id: string | null;
+  source_file_id: string | null;
   owner_user_id: number;
   task_type: string;
   status: ImageTaskStatus;
@@ -156,26 +179,16 @@ const imageTaskStatuses = new Set<ImageTaskStatus>([
   "cancelled"
 ]);
 
-const supportedTaskTypes = new Set([
-  "text_to_image",
-  "image_to_text",
-  "image_to_image",
-  "image_restore",
-  "upscale"
-]);
-
-const supportedImageRestoreTypes = new Set(["old_photo", "denoise", "deblur", "color_enhance"]);
-
-const allowedTransitions: ReadonlyMap<ImageTaskStatus, readonly ImageTaskStatus[]> = new Map([
-  ["pending", ["billing_reserved", "queued", "failed", "cancelled"]],
-  ["billing_reserved", ["queued", "billing_pending", "failed", "cancelled"]],
-  ["queued", ["running", "failed", "cancelled"]],
-  ["running", ["succeeded", "failed", "billing_pending"]],
-  ["billing_pending", ["succeeded", "failed"]],
-  ["succeeded", []],
-  ["failed", []],
-  ["cancelled", []]
-]);
+const allowedTransitions: Readonly<Record<ImageTaskStatus, readonly ImageTaskStatus[]>> = {
+  pending: ["billing_reserved", "queued", "failed", "cancelled"],
+  billing_reserved: ["queued", "billing_pending", "failed", "cancelled"],
+  queued: ["running", "failed", "cancelled"],
+  running: ["succeeded", "failed", "billing_pending"],
+  billing_pending: ["succeeded", "failed"],
+  succeeded: [],
+  failed: [],
+  cancelled: []
+};
 
 export class ImageTaskService {
   constructor(
@@ -184,13 +197,14 @@ export class ImageTaskService {
     private readonly auditLogger?: ImageTaskAuditLogger,
     private readonly modelResolver?: ImageTaskModelResolver,
     private readonly stylePresetResolver?: ImageTaskStylePresetResolver,
-    private readonly riskControlService?: Pick<RiskControlService, "assertAllowed">
+    private readonly riskControlService?: Pick<RiskControlService, "assertAllowed">,
+    private readonly taskCreationRepository?: ImageTaskCreationRepository
   ) {}
 
   async createTask(request: CreateImageTaskRequest): Promise<ImageTaskResult> {
     const taskType = normalizeRequiredString(request.taskType, "task_type");
 
-    if (!supportedTaskTypes.has(taskType)) {
+    if (!isSupportedImageTaskType(taskType)) {
       throw new ImageTaskServiceError("TASK_TYPE_UNSUPPORTED", "当前不支持该图片任务类型。", 400);
     }
 
@@ -229,7 +243,17 @@ export class ImageTaskService {
         : (resolvedModel?.gatewayCapability ?? null);
     const upscaleFactor = request.upscaleFactor ?? null;
     const sourceTaskId = normalizeOptionalString(request.sourceTaskId);
+    const sourceFileId = normalizeOptionalString(request.sourceFileId);
     const entitlementId = request.entitlementId ?? null;
+
+    if (sourceTaskId === null && sourceFileId !== null) {
+      // 来源文件必须绑定来源任务，避免客户端提交无法验证归属的孤立文件链路。
+      throw new ImageTaskServiceError(
+        "SOURCE_FILE_WITHOUT_TASK",
+        "来源文件必须与来源任务同时提供。",
+        400
+      );
+    }
 
     if (entitlementId !== null && (!Number.isInteger(entitlementId) || entitlementId < 1)) {
       throw new ImageTaskServiceError("ENTITLEMENT_ID_INVALID", "权益 ID 必须是正整数。", 400);
@@ -282,6 +306,7 @@ export class ImageTaskService {
         imageCount,
         upscaleFactor,
         sourceTaskId,
+        sourceFileId,
         entitlementId
       });
 
@@ -302,7 +327,7 @@ export class ImageTaskService {
 
       if (
         stylePresetId === null ||
-        (this.stylePresetResolver === undefined && !supportedImageRestoreTypes.has(stylePresetId))
+        (this.stylePresetResolver === undefined && !isSupportedImageRestoreType(stylePresetId))
       ) {
         // 修复类型在计费预占前收紧，防止非法字符串进入 worker 后静默降级并占用额度。
         throw new ImageTaskServiceError("IMAGE_RESTORE_TYPE_INVALID", "图片修复类型不合法。", 400);
@@ -341,6 +366,7 @@ export class ImageTaskService {
         ownerUserId: request.ownerUserId,
         taskType,
         sourceTaskId,
+        sourceFileId,
         inputFileIds
       });
     }
@@ -357,7 +383,8 @@ export class ImageTaskService {
       });
     }
 
-    const taskId = `task_${randomUUID().replaceAll("-", "")}`;
+    // 任务 ID 由用户与创建幂等键稳定派生，并发重复请求会复用同一个 reserve 幂等键。
+    const taskId = createStableTaskId(request.ownerUserId, taskCreateIdempotencyKey);
     const reserveIdempotencyKey = `${taskId}:${taskType}:reserve`;
     const reservedBilling =
       this.billingService === undefined
@@ -377,9 +404,10 @@ export class ImageTaskService {
             expectedPoints: request.expectedPoints,
             idempotencyKey: reserveIdempotencyKey
           });
-    const task = await this.repository.create({
+    const taskInput: CreateImageTaskRecordInput = {
       id: taskId,
       source_task_id: sourceTaskId,
+      source_file_id: sourceFileId,
       owner_user_id: request.ownerUserId,
       entitlement_id: entitlementId,
       task_type: taskType,
@@ -398,6 +426,43 @@ export class ImageTaskService {
       cost_points: reservedBilling?.estimate.estimated_points ?? null,
       billing_event_id: reservedBilling?.billing_event.id ?? null,
       idempotency_key: taskCreateIdempotencyKey
+    };
+    let task: ImageTaskRecord;
+
+    try {
+      task = await (this.taskCreationRepository ?? this.repository).create(taskInput);
+    } catch (error: unknown) {
+      if (reservedBilling !== undefined && this.billingService !== undefined) {
+        // 预占已成功但任务与 Outbox 事务失败时，用稳定 release 幂等键补偿，避免形成孤立 hold。
+        await this.billingService.release({
+          ownerUserId: request.ownerUserId,
+          taskId,
+          reserveBillingEventId: reservedBilling.billing_event.id,
+          idempotencyKey: `${taskId}:${taskType}:release`,
+          reasonCode: "IMAGE_TASK_PERSISTENCE_FAILED",
+          reasonMessage: "图片任务保存失败，已释放预占积分。"
+        });
+      }
+
+      throw error;
+    }
+
+    // 并发唯一键冲突可能返回首次事务的任务，仍要核对参数，不能让相同幂等键代表不同请求。
+    assertIdempotentTaskMatches(task, {
+      taskType,
+      prompt,
+      negativePrompt,
+      stylePresetId,
+      inputFileIds,
+      gatewayModelCode,
+      gatewayCapability,
+      quality,
+      imageSize,
+      imageCount,
+      upscaleFactor,
+      sourceTaskId,
+      sourceFileId,
+      entitlementId
     });
 
     return {
@@ -501,6 +566,7 @@ export class ImageTaskService {
       imageCount: sourceTask.image_count,
       upscaleFactor: sourceTask.upscale_factor ?? undefined,
       sourceTaskId: sourceTask.source_task_id ?? undefined,
+      sourceFileId: sourceTask.source_file_id ?? undefined,
       entitlementId,
       requestId: requestContext?.requestId,
       requestIp: requestContext?.requestIp,
@@ -524,7 +590,7 @@ export class ImageTaskService {
     const pageSize = normalizePageSize(input.pageSize ?? 20);
     const taskType = normalizeOptionalString(input.taskType);
 
-    if (taskType !== null && !supportedTaskTypes.has(taskType)) {
+    if (taskType !== null && !isSupportedImageTaskType(taskType)) {
       throw new ImageTaskServiceError("TASK_TYPE_UNSUPPORTED", "当前不支持该图片任务类型。", 400);
     }
 
@@ -559,6 +625,22 @@ export class ImageTaskService {
       throw new ImageTaskServiceError("IMAGE_TASK_FORBIDDEN", "不能修改他人的图片任务。", 403);
     }
 
+    if (request.workerLockToken !== undefined) {
+      const executionActive = await this.repository.isExecutionActive?.({
+        taskId: request.taskId,
+        lockToken: request.workerLockToken
+      });
+
+      if (executionActive !== true) {
+        // 先验证数据库租约再触发结算或释放，过期 Worker 不得改变计费与任务终态。
+        throw new ImageTaskServiceError(
+          "IMAGE_TASK_WORKER_LEASE_LOST",
+          "任务执行权已转移，当前 Worker 不能继续提交结果。",
+          409
+        );
+      }
+    }
+
     assertTransitionAllowed(currentTask.status, request.toStatus);
     assertFailureReason(request);
     const settleResult =
@@ -566,7 +648,7 @@ export class ImageTaskService {
         ? await this.settleReservedBilling(currentTask, request)
         : undefined;
     const releaseResult =
-      request.toStatus === "failed"
+      request.toStatus === "failed" || request.toStatus === "cancelled"
         ? await this.releaseReservedBilling(currentTask, request)
         : undefined;
     const persistedStatus = settleResult?.settled === false ? "billing_pending" : request.toStatus;
@@ -595,7 +677,8 @@ export class ImageTaskService {
           ? "图片已生成，积分结算等待对账。"
           : releaseResult?.released === false
             ? "任务失败，积分释放等待对账。"
-            : normalizeOptionalString(request.errorMessage)
+            : normalizeOptionalString(request.errorMessage),
+      workerLockToken: request.workerLockToken
     });
 
     if (updatedTask === undefined) {
@@ -610,6 +693,168 @@ export class ImageTaskService {
     return {
       task: toPublicImageTask(updatedTask)
     };
+  }
+
+  async finalizeClaimedFailure(request: FinalizeClaimedFailureRequest): Promise<ImageTaskResult> {
+    const currentTask = await this.repository.findById(request.taskId);
+
+    if (currentTask === undefined) {
+      throw new ImageTaskServiceError("IMAGE_TASK_NOT_FOUND", "图片任务不存在。", 404);
+    }
+
+    if (currentTask.owner_user_id !== request.ownerUserId) {
+      throw new ImageTaskServiceError("IMAGE_TASK_FORBIDDEN", "不能修改他人的图片任务。", 403);
+    }
+
+    const executionActive = await this.repository.isExecutionActive?.({
+      taskId: request.taskId,
+      lockToken: request.workerLockToken
+    });
+
+    if (executionActive !== true || currentTask.status !== "running") {
+      throw new ImageTaskServiceError(
+        "IMAGE_TASK_WORKER_LEASE_LOST",
+        "任务执行权已转移，当前恢复流程不能提交最终失败。",
+        409
+      );
+    }
+
+    assertFailureReason({ ...request, toStatus: "failed" });
+    // 先原子落失败终态并清除租约，彻底阻止新 Worker 在积分释放期间重新接管任务。
+    const markedFailed = await this.repository.updateStatus({
+      taskId: request.taskId,
+      ownerUserId: request.ownerUserId,
+      fromStatus: "running",
+      toStatus: "failed",
+      errorCode: "BILLING_RELEASE_PENDING",
+      errorMessage: "任务已终止，预占积分正在释放。",
+      workerLockToken: request.workerLockToken
+    });
+
+    if (markedFailed === undefined) {
+      throw new ImageTaskServiceError(
+        "IMAGE_TASK_WORKER_LEASE_LOST",
+        "任务执行权已转移，当前恢复流程不能提交最终失败。",
+        409
+      );
+    }
+
+    const releaseResult = await this.releaseReservedBilling(currentTask, {
+      ...request,
+      toStatus: "failed"
+    });
+
+    if (releaseResult?.released === false) {
+      // 释放失败时保留 BILLING_RELEASE_PENDING，交给现有管理端对账流程继续处理。
+      return { task: toPublicImageTask(markedFailed) };
+    }
+
+    const updatedTask = await this.repository.updateFailedReason?.({
+      taskId: request.taskId,
+      ownerUserId: request.ownerUserId,
+      expectedErrorCode: "BILLING_RELEASE_PENDING",
+      errorCode: normalizeRequiredString(request.errorCode, "error_code"),
+      errorMessage: normalizeRequiredString(request.errorMessage, "error_message")
+    });
+    const finalTask = updatedTask ?? (await this.repository.findById(request.taskId));
+
+    if (finalTask === undefined) {
+      throw new ImageTaskServiceError("IMAGE_TASK_NOT_FOUND", "图片任务不存在。", 404);
+    }
+
+    return { task: toPublicImageTask(finalTask) };
+  }
+
+  async recordWorkerOutput(request: RecordWorkerOutputRequest): Promise<ImageTaskResult> {
+    if (this.repository.recordOutputFile === undefined) {
+      if (request.workerLockToken !== undefined) {
+        throw new ImageTaskServiceError(
+          "IMAGE_TASK_WORKER_STORAGE_UNAVAILABLE",
+          "任务仓储不支持 Worker 结果登记。",
+          500
+        );
+      }
+
+      // 内存测试仓储和旧 inline 适配器仍由最终 succeeded 流转一次性写入 output_file_ids。
+      const currentTask = await this.repository.findById(request.taskId);
+
+      if (currentTask?.owner_user_id !== request.ownerUserId) {
+        throw new ImageTaskServiceError("IMAGE_TASK_NOT_FOUND", "图片任务不存在。", 404);
+      }
+
+      return { task: toPublicImageTask(currentTask) };
+    }
+
+    const updatedTask = await this.repository.recordOutputFile({
+      taskId: request.taskId,
+      ownerUserId: request.ownerUserId,
+      fileId: request.fileId,
+      gatewayRequestId: request.gatewayRequestId,
+      workerLockToken: request.workerLockToken
+    });
+
+    if (updatedTask === undefined) {
+      // 文件已进入对象存储后立即登记；若租约已失效则拒绝把它挂到其他执行者的任务上。
+      throw new ImageTaskServiceError(
+        "IMAGE_TASK_WORKER_LEASE_LOST",
+        "任务执行权已转移，结果文件登记失败。",
+        409
+      );
+    }
+
+    return { task: toPublicImageTask(updatedTask) };
+  }
+
+  async markTaskQueued(taskId: string): Promise<void> {
+    const task = await this.repository.findById(taskId);
+
+    if (task === undefined) {
+      throw new ImageTaskServiceError("IMAGE_TASK_NOT_FOUND", "图片任务不存在。", 404);
+    }
+
+    if (task.status === "queued" || task.status === "running" || task.status === "succeeded") {
+      // Dispatcher 重放时已推进的任务直接视为成功，不能反向修改状态。
+      return;
+    }
+
+    if (task.status !== "pending" && task.status !== "billing_reserved") {
+      throw new ImageTaskServiceError(
+        "IMAGE_TASK_QUEUE_STATUS_INVALID",
+        "当前任务状态不能进入队列。",
+        409
+      );
+    }
+
+    await this.transitionTask({
+      ownerUserId: task.owner_user_id,
+      taskId: task.id,
+      toStatus: "queued"
+    });
+  }
+
+  async cancelTaskForDispatchTimeout(taskId: string): Promise<void> {
+    const task = await this.repository.findById(taskId);
+
+    if (task === undefined || task.status === "cancelled" || task.status === "failed") {
+      return;
+    }
+
+    if (
+      task.status !== "pending" &&
+      task.status !== "billing_reserved" &&
+      task.status !== "queued"
+    ) {
+      // 已开始运行或进入终态的任务不再按 Outbox 超时取消，避免与 Worker 竞争结果。
+      return;
+    }
+
+    await this.transitionTask({
+      ownerUserId: task.owner_user_id,
+      taskId: task.id,
+      toStatus: "cancelled",
+      errorCode: "OUTBOX_DISPATCH_TIMEOUT",
+      errorMessage: "任务等待入队超时，已取消。"
+    });
   }
 
   private async releaseReservedBilling(
@@ -654,6 +899,7 @@ export class ImageTaskService {
     ownerUserId: number;
     taskType: string;
     sourceTaskId: string;
+    sourceFileId: string | null;
     inputFileIds: string[];
   }): Promise<void> {
     if (input.taskType !== "image_to_image") {
@@ -690,11 +936,18 @@ export class ImageTaskService {
       );
     }
 
-    if (
-      input.inputFileIds.length !== 1 ||
-      !sourceTask.output_file_ids.includes(input.inputFileIds[0] ?? "")
-    ) {
-      // 来源关系与输入图必须一致，防止前端伪造 source_task_id 形成错误作品链路。
+    if (input.inputFileIds.length !== 1) {
+      throw new ImageTaskServiceError(
+        "SOURCE_TASK_FILE_MISMATCH",
+        "输入图片不是来源任务的生成结果。",
+        400
+      );
+    }
+
+    const sourceFileId = input.sourceFileId ?? input.inputFileIds[0];
+
+    if (!sourceTask.output_file_ids.includes(sourceFileId)) {
+      // 标注图是新上传文件，不能再要求其 ID 等于原结果；改为单独校验声明的来源文件。
       throw new ImageTaskServiceError(
         "SOURCE_TASK_FILE_MISMATCH",
         "输入图片不是来源任务的生成结果。",
@@ -713,7 +966,7 @@ export class ImageTaskService {
 }
 
 function assertTransitionAllowed(fromStatus: ImageTaskStatus, toStatus: ImageTaskStatus): void {
-  const nextStatuses = allowedTransitions.get(fromStatus) ?? [];
+  const nextStatuses = allowedTransitions[fromStatus];
 
   if (!nextStatuses.includes(toStatus)) {
     throw new ImageTaskServiceError(
@@ -755,6 +1008,7 @@ interface NormalizedTaskCreationParameters {
   imageCount: number;
   upscaleFactor: number | null;
   sourceTaskId: string | null;
+  sourceFileId: string | null;
   entitlementId: number | null;
 }
 
@@ -775,6 +1029,7 @@ function assertIdempotentTaskMatches(
     existingTask.image_count === input.imageCount &&
     existingTask.upscale_factor === input.upscaleFactor &&
     existingTask.source_task_id === input.sourceTaskId &&
+    existingTask.source_file_id === input.sourceFileId &&
     existingTask.entitlement_id === input.entitlementId;
 
   if (!matches) {
@@ -789,6 +1044,15 @@ function assertIdempotentTaskMatches(
 
 function arraysEqual(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function createStableTaskId(ownerUserId: number, idempotencyKey: string): string {
+  const digest = createHash("sha256")
+    .update(`${String(ownerUserId)}:${idempotencyKey}`)
+    .digest("hex")
+    .slice(0, 32);
+
+  return `task_${digest}`;
 }
 
 function normalizeRequiredString(value: string, fieldName: string): string {
@@ -857,6 +1121,7 @@ function toPublicImageTask(task: ImageTaskRecord): PublicImageTask {
   return {
     id: task.id,
     source_task_id: task.source_task_id,
+    source_file_id: task.source_file_id,
     owner_user_id: task.owner_user_id,
     task_type: task.task_type,
     status: task.status,

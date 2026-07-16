@@ -6,6 +6,8 @@
 
 因此需要准备的是“AI 网关目录里的逻辑模型”，不是在图片应用里保存供应商 API Key。
 
+当前 MVP 阶段允许先通过应用服务端 `.env` 配置 `IMAGE_MODEL_CATALOG_JSON` 作为模型目录来源。该配置只保存逻辑模型 code、能力标签、展示信息和可用状态，不保存供应商密钥。前端仍统一调用 `GET /api/image/models`，后续墨灵 AI 网关提供用户可见模型目录接口后，可在后端把目录来源替换为“AI 网关目录 + env 白名单”，前端接口不变。
+
 模型准备原则：
 
 - 每个模型必须在 AI 网关目录中有稳定的逻辑模型 code。
@@ -376,3 +378,26 @@ visible_scope            可见范围
 6. 提示词优化模型：prompt_optimize
 7. 高清放大模型：upscale 或 image_restore
 ```
+
+## 11. 当前 MVP 环境变量配置
+
+当前实现支持用 `.env` 配置模型目录：
+
+```text
+IMAGE_MODEL_ENABLED_CAPABILITIES=image_generation,vision_text,moderation,image_edit,image_restore,upscale,prompt_optimize
+IMAGE_MODEL_REQUIRED_CAPABILITIES=image_generation,vision_text,moderation
+IMAGE_MODEL_CATALOG_JSON=[...]
+```
+
+`IMAGE_MODEL_CATALOG_JSON` 是 JSON 数组，每个模型项字段与本文第 5 节建议字段保持一致。后端会过滤：
+
+- `status !== active` 的模型。
+- `capability` 不在 `IMAGE_MODEL_ENABLED_CAPABILITIES` 中的模型。
+
+`GET /api/image/models` 会返回：
+
+- `items`：当前可展示模型。
+- `required_capabilities`：MVP 必备能力。
+- `missing_required_capabilities`：缺失的必备能力。
+- `message`：中文提示；模型为空或必备能力缺失时用于前端展示。
+- `source`：当前为 `env`。

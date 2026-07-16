@@ -1,12 +1,15 @@
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 
-export interface ApplicationSession {
-  session_id: string;
+export interface SessionIdentity {
   user_id: number;
   app_id: number;
   product_id: number;
   entitlement_id?: number;
+}
+
+export interface ApplicationSession extends SessionIdentity {
+  session_id: string;
   created_at: string;
   expires_at: string;
 }
@@ -16,13 +19,25 @@ export interface CreatedSession {
   session: ApplicationSession;
 }
 
-export class InMemorySessionStore {
+export interface SessionStore {
+  createSession(identity: SessionIdentity, ttlSeconds: number): Promise<CreatedSession>;
+  getSession(token: string | undefined): Promise<ApplicationSession | undefined>;
+  deleteSession(token: string | undefined): Promise<void>;
+}
+
+export class SessionStoreError extends Error {
+  readonly code = "SESSION_STORE_UNAVAILABLE";
+
+  constructor(options?: ErrorOptions) {
+    super("会话服务暂不可用，请稍后重试。", options);
+    this.name = "SessionStoreError";
+  }
+}
+
+export class InMemorySessionStore implements SessionStore {
   private readonly sessions = new Map<string, ApplicationSession>();
 
-  createSession(
-    identity: Omit<ApplicationSession, "session_id" | "created_at" | "expires_at">,
-    ttlSeconds: number
-  ): CreatedSession {
+  createSession(identity: SessionIdentity, ttlSeconds: number): Promise<CreatedSession> {
     const now = new Date();
     const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
     const token = randomBytes(32).toString("base64url");
@@ -36,33 +51,35 @@ export class InMemorySessionStore {
     // 内存存储只保存应用自有 session token，不保存墨灵一次性 ticket，避免 ticket 被二次使用或泄漏。
     this.sessions.set(token, session);
 
-    return { token, session };
+    return Promise.resolve({ token, session });
   }
 
-  getSession(token: string | undefined): ApplicationSession | undefined {
+  getSession(token: string | undefined): Promise<ApplicationSession | undefined> {
     if (token === undefined || token.length === 0) {
-      return undefined;
+      return Promise.resolve(undefined);
     }
 
     const session = this.sessions.get(token);
 
     if (session === undefined) {
-      return undefined;
+      return Promise.resolve(undefined);
     }
 
     if (new Date(session.expires_at).getTime() <= Date.now()) {
       // 读取时顺手清理过期 session，避免无效凭证长期留在进程内存。
       this.sessions.delete(token);
-      return undefined;
+      return Promise.resolve(undefined);
     }
 
-    return session;
+    return Promise.resolve(session);
   }
 
-  deleteSession(token: string | undefined): void {
+  deleteSession(token: string | undefined): Promise<void> {
     if (token !== undefined) {
       this.sessions.delete(token);
     }
+
+    return Promise.resolve();
   }
 }
 

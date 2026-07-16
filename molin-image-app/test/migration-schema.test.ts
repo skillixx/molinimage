@@ -18,7 +18,8 @@ const requiredTables = [
   "image_model_defaults",
   "billing_reconciliation_attempts",
   "risk_control_events",
-  "risk_control_counters"
+  "risk_control_counters",
+  "image_task_outbox"
 ];
 const requiredIndexes = [
   "uk_image_tasks_idempotency_key",
@@ -45,7 +46,10 @@ const requiredIndexes = [
   "idx_risk_control_ip_created",
   "idx_risk_control_decision_created",
   "idx_risk_control_reason_created",
-  "idx_risk_control_counters_updated"
+  "idx_risk_control_counters_updated",
+  "uk_image_task_outbox_task_id",
+  "idx_image_task_outbox_dispatch",
+  "idx_image_task_outbox_timeout"
 ];
 
 void test("基础表 migration 包含 P1-G02 要求的表、引擎、字符集和关键索引", async () => {
@@ -199,6 +203,126 @@ void test("风格模板 migration 支持分类、预览图、排序启停和默�
   assert.match(downSql, /DROP COLUMN category/i);
 });
 
+void test("标注再次编辑 migration 记录原始来源文件并支持回滚", async () => {
+  const upSql = await readFile(resolve("migrations", "016_add_source_file_id.up.sql"), "utf8");
+  const downSql = await readFile(resolve("migrations", "016_add_source_file_id.down.sql"), "utf8");
+
+  assert.match(upSql, /ADD COLUMN source_file_id VARCHAR\(64\) NULL/i);
+  assert.match(upSql, /idx_image_tasks_source_file_id/i);
+  assert.match(downSql, /DROP INDEX idx_image_tasks_source_file_id/i);
+  assert.match(downSql, /DROP COLUMN source_file_id/i);
+});
+
+void test("风格模板扩充 migration 覆盖三类任务并只回滚新增模板", async () => {
+  const upSql = await readFile(resolve("migrations", "014_seed_more_style_presets.up.sql"), "utf8");
+  const downSql = await readFile(
+    resolve("migrations", "014_seed_more_style_presets.down.sql"),
+    "utf8"
+  );
+  const newTemplateIds = [
+    "tti_commercial_photo",
+    "tti_ecommerce_main_image",
+    "tti_xiaohongshu_cover",
+    "tti_douyin_cover",
+    "tti_realistic_photo",
+    "tti_chinese_style",
+    "tti_anime_style",
+    "tti_children_book",
+    "tti_watercolor",
+    "tti_oil_painting",
+    "tti_cyberpunk",
+    "tti_minimal_premium",
+    "tti_3d_render",
+    "tti_logo_icon",
+    "tti_movie_poster",
+    "edit_scene_replace",
+    "edit_outfit_change",
+    "edit_hair_style",
+    "edit_season_change",
+    "edit_lighting",
+    "edit_to_chinese_style",
+    "edit_to_anime",
+    "edit_product_refine",
+    "restore_portrait_enhance",
+    "restore_low_light",
+    "restore_low_resolution",
+    "restore_background_extend",
+    "restore_color_repair",
+    "restore_detail_enhance"
+  ];
+
+  assert.match(upSql, /ON DUPLICATE KEY UPDATE/i);
+  assert.match(upSql, /text_to_image/i);
+  assert.match(upSql, /image_to_image/i);
+  assert.match(upSql, /image_restore/i);
+  assert.match(upSql, /tti_xiaohongshu_cover/i);
+  assert.match(upSql, /tti_anime_style/i);
+  assert.match(upSql, /edit_outfit_change/i);
+  assert.match(upSql, /edit_product_refine/i);
+  assert.match(upSql, /restore_portrait_enhance/i);
+  assert.match(upSql, /restore_low_light/i);
+  assert.match(
+    upSql,
+    /UPDATE style_presets SET category = 'portrait', sort_order = 60 WHERE id = 'tti_portrait_editorial'/i
+  );
+
+  for (const templateId of newTemplateIds) {
+    assert.match(upSql, new RegExp(templateId, "i"));
+    assert.match(downSql, new RegExp(templateId, "i"));
+  }
+
+  assert.doesNotMatch(downSql, /tti_product_poster/i);
+  assert.doesNotMatch(downSql, /keep_subject/i);
+  assert.doesNotMatch(downSql, /old_photo/i);
+});
+
+void test("图片模型尺寸扩充 migration 让生成和编辑模型支持工作台完整尺寸", async () => {
+  const upSql = await readFile(
+    resolve("migrations", "015_expand_image_model_sizes.up.sql"),
+    "utf8"
+  );
+  const downSql = await readFile(
+    resolve("migrations", "015_expand_image_model_sizes.down.sql"),
+    "utf8"
+  );
+  const expandedSizes = [
+    "512x512",
+    "640x640",
+    "768x768",
+    "896x896",
+    "1024x1024",
+    "512x768",
+    "640x960",
+    "768x1024",
+    "896x1152",
+    "960x1280",
+    "720x1280",
+    "1024x1536",
+    "640x360",
+    "768x512",
+    "896x512",
+    "960x640",
+    "1024x768",
+    "1280x720",
+    "1280x960",
+    "1536x1024"
+  ];
+
+  assert.match(upSql, /UPDATE image_model_configs/i);
+  assert.match(upSql, /capability IN \('image_generation', 'image_edit'\)/i);
+  assert.match(upSql, /JSON_ARRAY/i);
+
+  for (const size of expandedSizes) {
+    assert.match(upSql, new RegExp(size, "i"));
+  }
+
+  assert.match(downSql, /1024x1024/i);
+  assert.match(downSql, /1024x1536/i);
+  assert.match(downSql, /1536x1024/i);
+  assert.doesNotMatch(downSql, /512x512/i);
+  assert.doesNotMatch(downSql, /1280x720/i);
+});
+
 void test("对账管理 migration 支持重试结算、重试释放和结果记录", async () => {
   const upSql = await readFile(
     resolve("migrations", "011_create_billing_reconciliation_attempts.up.sql"),
@@ -253,6 +377,44 @@ void test("风控计数器 migration 支持窗口内原子限流", async () => {
   assert.match(upSql, /PRIMARY KEY \(subject_type, subject_key, bucket_start\)/i);
   assert.match(upSql, /request_count INT UNSIGNED/i);
   assert.match(downSql, /DROP TABLE IF EXISTS risk_control_counters/i);
+});
+
+void test("任务 Outbox migration 支持事务投递、退避扫描和任务级去重", async () => {
+  const upSql = await readFile(
+    resolve("migrations", "017_create_image_task_outbox.up.sql"),
+    "utf8"
+  );
+  const downSql = await readFile(
+    resolve("migrations", "017_create_image_task_outbox.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /CREATE TABLE IF NOT EXISTS image_task_outbox/i);
+  assert.match(upSql, /status VARCHAR\(32\)/i);
+  assert.match(upSql, /attempt_count INT UNSIGNED/i);
+  assert.match(upSql, /next_attempt_at DATETIME\(3\)/i);
+  assert.match(upSql, /UNIQUE KEY uk_image_task_outbox_task_id \(task_id\)/i);
+  assert.match(upSql, /idx_image_task_outbox_dispatch/i);
+  assert.match(upSql, /idx_image_task_outbox_timeout/i);
+  assert.match(downSql, /DROP TABLE IF EXISTS image_task_outbox/i);
+});
+
+void test("独立 Worker migration 支持数据库租约、锁恢复和执行次数", async () => {
+  const upSql = await readFile(
+    resolve("migrations", "018_add_image_task_worker_lease.up.sql"),
+    "utf8"
+  );
+  const downSql = await readFile(
+    resolve("migrations", "018_add_image_task_worker_lease.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /worker_lock_token VARCHAR\(64\)/i);
+  assert.match(upSql, /worker_lock_expires_at DATETIME\(3\)/i);
+  assert.match(upSql, /worker_started_at DATETIME\(3\)/i);
+  assert.match(upSql, /worker_attempt_count INT UNSIGNED/i);
+  assert.match(upSql, /idx_image_tasks_worker_recovery/i);
+  assert.match(downSql, /DROP COLUMN worker_lock_token/i);
 });
 
 async function readAllUpMigrations(): Promise<string> {

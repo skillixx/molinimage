@@ -5,6 +5,7 @@ import test from "node:test";
 
 import { createAppRequestHandler } from "../src/app/create-app.js";
 import type { AppConfig } from "../src/config/app-config.js";
+import { InMemorySessionStore } from "../src/modules/auth/session-store.js";
 import type {
   LaunchTicketVerifier,
   MolingLaunchIdentity
@@ -19,6 +20,19 @@ const testConfig: AppConfig = {
   appBaseUrl: "http://127.0.0.1",
   databaseUrl: "mysql://user:password@127.0.0.1:3306/molinimage",
   redisUrl: "redis://127.0.0.1:6379/0",
+  redisKeyPrefix: "molinimage:test",
+  redisConnectTimeoutMs: 10000,
+  redisCommandTimeoutMs: 5000,
+  redisMaxRetriesPerRequest: 3,
+  imageTaskQueueName: "molinimage-image-tasks",
+  imageTaskWorkerConcurrency: 2,
+  imageTaskJobAttempts: 3,
+  imageTaskJobTimeoutMs: 120000,
+  imageTaskExecutionMode: "inline",
+  imageTaskOutboxPollIntervalMs: 1000,
+  imageTaskOutboxBatchSize: 20,
+  imageTaskOutboxMaxWaitMs: 300000,
+  imageTaskOutboxMaxBackoffMs: 60000,
   storageProvider: "minio",
   storageEndpoint: "http://127.0.0.1:9000",
   storageBucket: "molinimage",
@@ -42,6 +56,7 @@ const testConfig: AppConfig = {
   riskControlDisabledCapabilities: [],
   trustProxy: true,
   internalApiToken: "test_internal_token",
+  sessionStore: "memory",
   sessionCookieName: "molinimage_session",
   sessionCookieSecure: false,
   sessionTtlSeconds: 86400,
@@ -171,6 +186,37 @@ void test("文生图任务创建后可由 worker 返回 succeeded 和结果预�
   }
 });
 
+void test("queue 模式创建任务时 API 返回 202 且不直接调用进程内 worker", async () => {
+  const imageTaskService = new FakeImageTaskService();
+  imageTaskService.createResultInputFileIds.push("file_input_001");
+  const imageGenerationWorkerService = new FakeImageGenerationWorkerService();
+  const fileService = new FakeFileService(true);
+  const app = await startTestApp(
+    imageTaskService,
+    imageGenerationWorkerService,
+    fileService,
+    undefined,
+    { ...testConfig, imageTaskExecutionMode: "queue" }
+  );
+
+  try {
+    const cookie = await createSessionCookie(app.baseUrl);
+    const response = await fetch(`${app.baseUrl}/api/image/tasks`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie },
+      body: JSON.stringify({ task_type: "text_to_image", prompt: "异步海报" })
+    });
+    const body = (await response.json()) as ImageTaskResult;
+
+    assert.equal(response.status, 202);
+    assert.equal(body.task.status, "billing_reserved");
+    assert.deepEqual(imageGenerationWorkerService.taskIds, []);
+    assert.equal(fileService.createPreviewUrlsCalls, 0);
+  } finally {
+    await app.close();
+  }
+});
+
 void test("图生文任务创建会校验输入文件并返回可复制文本结果", async () => {
   const imageTaskService = new FakeImageTaskService();
   const imageGenerationWorkerService = new FakeImageGenerationWorkerService();
@@ -231,6 +277,7 @@ void test("图生图任务创建会校验输入文件并返回输入图与输出
         style_preset_id: "change_background",
         input_file_ids: ["file_input_001"],
         source_task_id: "task_history_source_001",
+        source_file_id: "file_source_result_001",
         gateway_model_code: "image-edit-default",
         gateway_capability: "image_edit",
         image_size: "1024x1024",
@@ -250,6 +297,7 @@ void test("图生图任务创建会校验输入文件并返回输入图与输出
     assert.equal(imageTaskService.createRequests[0]?.taskType, "image_to_image");
     assert.equal(imageTaskService.createRequests[0]?.stylePresetId, "change_background");
     assert.equal(imageTaskService.createRequests[0]?.sourceTaskId, "task_history_source_001");
+    assert.equal(imageTaskService.createRequests[0]?.sourceFileId, "file_source_result_001");
     assert.equal(imageTaskService.createRequests[0]?.gatewayCapability, "image_edit");
     assert.equal(imageGenerationWorkerService.taskIds[0], "task_api_001");
     assert.equal(body.task.status, "succeeded");
@@ -466,8 +514,84 @@ void test("失败任务重试接口按当前 session 用户创建 retry task 并
   }
 });
 
+void test("queue 模式重试任务时 API 返回 202 且不直接调用进程内 worker", async () => {
+  const imageTaskService = new FakeImageTaskService();
+  const imageGenerationWorkerService = new FakeImageGenerationWorkerService();
+  const app = await startTestApp(
+    imageTaskService,
+    imageGenerationWorkerService,
+    undefined,
+    undefined,
+    { ...testConfig, imageTaskExecutionMode: "queue" }
+  );
+
+  try {
+    const cookie = await createSessionCookie(app.baseUrl);
+    const response = await fetch(`${app.baseUrl}/api/image/tasks/task_failed_001/retry`, {
+      method: "POST",
+      headers: { cookie }
+    });
+    const body = (await response.json()) as ImageTaskResult & {
+      retried_from_task_id: string;
+    };
+
+    assert.equal(response.status, 202);
+    assert.equal(body.task.status, "billing_reserved");
+    assert.equal(body.retried_from_task_id, "task_failed_001");
+    assert.deepEqual(imageGenerationWorkerService.taskIds, []);
+  } finally {
+    await app.close();
+  }
+});
+
+void test("提示词优化接口必须登录，并按当前 session 用户选择模型优化", async () => {
+  const imageTaskService = new FakeImageTaskService();
+  const promptOptimizationService = new FakePromptOptimizationService();
+  const app = await startTestApp(imageTaskService, undefined, undefined, promptOptimizationService);
+
+  try {
+    const unauthorizedResponse = await fetch(`${app.baseUrl}/api/image/prompts/optimize`, {
+      method: "POST",
+      body: JSON.stringify({ prompt: "蓝色杯子" })
+    });
+    const cookie = await createSessionCookie(app.baseUrl);
+    const response = await fetch(`${app.baseUrl}/api/image/prompts/optimize`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        cookie
+      },
+      body: JSON.stringify({
+        prompt: "蓝色杯子",
+        task_type: "text_to_image"
+      })
+    });
+    const body = (await response.json()) as {
+      original_prompt: string;
+      optimized_prompt: string;
+      gateway_model_code: string;
+      request_id: string;
+    };
+
+    assert.equal(unauthorizedResponse.status, 401);
+    assert.equal(response.status, 200);
+    assert.deepEqual(promptOptimizationService.requests[0], {
+      ownerUserId: 479,
+      prompt: "蓝色杯子",
+      taskType: "text_to_image"
+    });
+    assert.equal(body.original_prompt, "蓝色杯子");
+    assert.equal(body.optimized_prompt, "玻璃质感的蓝色杯子，柔和自然光，干净背景。");
+    assert.equal(body.gateway_model_code, "prompt-optimize-default");
+    assert.equal(body.request_id, "prompt_request_api_001");
+  } finally {
+    await app.close();
+  }
+});
+
 class FakeImageTaskService {
   readonly createRequests: CreateImageTaskRequest[] = [];
+  readonly createResultInputFileIds: string[] = [];
   readonly getRequests: { ownerUserId: number; taskId: string }[] = [];
   readonly transitionRequests: TransitionImageTaskRequest[] = [];
   readonly historyRequests: {
@@ -491,8 +615,10 @@ class FakeImageTaskService {
       task: {
         ...createTaskResult("task_api_001", request.ownerUserId, "billing_reserved"),
         task_type: request.taskType,
+        input_file_ids: [...this.createResultInputFileIds],
         upscale_factor: request.upscaleFactor ?? null,
-        source_task_id: request.sourceTaskId ?? null
+        source_task_id: request.sourceTaskId ?? null,
+        source_file_id: request.sourceFileId ?? null
       }
     });
   }
@@ -586,6 +712,21 @@ class FakeImageTaskService {
   }
 }
 
+class FakePromptOptimizationService {
+  readonly requests: { ownerUserId: number; prompt: string; taskType?: string | null }[] = [];
+
+  optimizePrompt(request: { ownerUserId: number; prompt: string; taskType?: string | null }) {
+    this.requests.push(request);
+
+    return Promise.resolve({
+      original_prompt: request.prompt,
+      optimized_prompt: "玻璃质感的蓝色杯子，柔和自然光，干净背景。",
+      gateway_model_code: "prompt-optimize-default",
+      request_id: "prompt_request_api_001"
+    });
+  }
+}
+
 class FakeImageGenerationWorkerService {
   readonly taskIds: string[] = [];
 
@@ -606,6 +747,9 @@ class FakeImageGenerationWorkerService {
 
 class FakeFileService {
   readonly assertOwnedRequests: { ownerUserId: number; fileIds: string[] }[] = [];
+  createPreviewUrlsCalls = 0;
+
+  constructor(private readonly failPreviewUrls = false) {}
 
   assertFilesOwned(ownerUserId: number, fileIds: string[]) {
     this.assertOwnedRequests.push({ ownerUserId, fileIds });
@@ -626,6 +770,9 @@ class FakeFileService {
   }
 
   createPreviewUrls(_ownerUserId: number, fileIds: string[]) {
+    this.createPreviewUrlsCalls += 1;
+    if (this.failPreviewUrls) return Promise.reject(new Error("预览服务暂不可用"));
+
     return Promise.resolve(
       fileIds.map((fileId) => {
         const isInput = fileId.startsWith("file_input");
@@ -672,17 +819,21 @@ class FakeLaunchTicketVerifier implements LaunchTicketVerifier {
 async function startTestApp(
   imageTaskService: FakeImageTaskService,
   imageGenerationWorkerService?: FakeImageGenerationWorkerService,
-  fileService?: FakeFileService
+  fileService?: FakeFileService,
+  promptOptimizationService?: FakePromptOptimizationService,
+  config: AppConfig = testConfig
 ): Promise<{
   baseUrl: string;
   close: () => Promise<void>;
 }> {
   const server = createServer(
-    createAppRequestHandler(testConfig, {
+    createAppRequestHandler(config, {
       launchTicketVerifier: new FakeLaunchTicketVerifier(),
+      sessionStore: new InMemorySessionStore(),
       imageTaskService,
       imageGenerationWorkerService,
-      fileService
+      fileService,
+      promptOptimizationService
     })
   );
 
@@ -759,6 +910,7 @@ function createTaskResult(
     image_count: 1,
     upscale_factor: null,
     source_task_id: null,
+    source_file_id: null,
     cost_points: null,
     billing_event_id: null,
     error_code: null,
