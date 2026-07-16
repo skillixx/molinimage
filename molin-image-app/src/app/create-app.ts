@@ -1060,6 +1060,7 @@ async function handleCreateImageTask(
       imageCount: readOptionalNumberField(body, "image_count"),
       upscaleFactor: readOptionalNumberField(body, "upscale_factor"),
       sourceTaskId: readOptionalStringField(body, "source_task_id"),
+      sourceFileId: readOptionalStringField(body, "source_file_id"),
       expectedPricingRuleId: readNullableStringField(body, "expected_price_rule_id"),
       expectedPoints: readOptionalStringField(body, "expected_points"),
       idempotencyKey:

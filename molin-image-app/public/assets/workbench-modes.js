@@ -62,7 +62,12 @@ export const imageSizeOptions = [
   { value: "768x1024", label: "768 x 1024 · 竖版内容", ratio: "3:4", usage: "小红书、竖版配图" },
   { value: "896x1152", label: "896 x 1152 · 竖版详情", ratio: "7:9", usage: "商品详情、内容封面" },
   { value: "960x1280", label: "960 x 1280 · 高清竖图", ratio: "3:4", usage: "竖版海报、内容长图" },
-  { value: "720x1280", label: "720 x 1280 · 手机竖屏", ratio: "9:16", usage: "短视频封面、手机壁纸" },
+  {
+    value: "720x1280",
+    label: "720 x 1280 · 手机竖屏",
+    ratio: "9:16",
+    usage: "短视频封面、手机壁纸"
+  },
   {
     value: "1024x1536",
     label: "1024 x 1536 · 海报竖图",
@@ -80,7 +85,12 @@ export const imageSizeOptions = [
     usage: "PPT 配图、详情页插图"
   },
   { value: "1280x720", label: "1280 x 720 · 视频封面", ratio: "16:9", usage: "视频封面、横幅预览" },
-  { value: "1280x960", label: "1280 x 960 · 高清横图", ratio: "4:3", usage: "PPT 封面、详情页大图" },
+  {
+    value: "1280x960",
+    label: "1280 x 960 · 高清横图",
+    ratio: "4:3",
+    usage: "PPT 封面、详情页大图"
+  },
   {
     value: "1536x1024",
     label: "1536 x 1024 · 封面横图",
@@ -89,7 +99,90 @@ export const imageSizeOptions = [
   }
 ];
 
+export const imageSizeGroups = [
+  {
+    value: "square",
+    label: "方图",
+    sizes: ["512x512", "640x640", "768x768", "896x896", "1024x1024"]
+  },
+  {
+    value: "portrait",
+    label: "竖图",
+    sizes: ["512x768", "640x960", "768x1024", "896x1152", "960x1280", "1024x1536"]
+  },
+  { value: "mobile", label: "手机竖屏", sizes: ["720x1280"] },
+  {
+    value: "landscape",
+    label: "横图",
+    sizes: [
+      "640x360",
+      "768x512",
+      "896x512",
+      "960x640",
+      "1024x768",
+      "1280x720",
+      "1280x960",
+      "1536x1024"
+    ]
+  }
+];
+
+export const styleCategoryOptions = [
+  { value: "all", label: "全部", categories: [] },
+  {
+    value: "illustration",
+    label: "插画",
+    categories: ["anime", "chinese", "illustration"]
+  },
+  { value: "photography", label: "摄影", categories: ["photography", "photo"] },
+  { value: "portrait", label: "人物", categories: ["portrait", "people"] },
+  { value: "product", label: "产品", categories: ["product", "commerce"] },
+  { value: "design", label: "设计", categories: ["design", "render", "logo"] },
+  { value: "poster", label: "海报", categories: ["poster", "social"] }
+];
+
 export function hasStylePresetSupport(taskType) {
   // 前端模式是否展示模板卡片统一由模式配置决定，新增模式时只需要补 modeConfig。
   return modeConfig[taskType]?.supportsStylePreset === true;
+}
+
+export function findTaskModel(models, modelCode, taskType) {
+  const capability = modeConfig[taskType]?.capability;
+
+  if (typeof modelCode !== "string" || modelCode.length === 0 || capability === undefined) {
+    return undefined;
+  }
+
+  // 同一个网关模型可同时登记文生图、图生图等多种能力，不能只按模型代码取第一条记录。
+  return models.find(
+    (model) =>
+      model.gateway_model_code === modelCode &&
+      model.capability === capability &&
+      Array.isArray(model.supported_task_types) &&
+      model.supported_task_types.includes(taskType)
+  );
+}
+
+export function isReferenceImageTaskModelCompatible(model, taskType, imageSize = null) {
+  const capability = modeConfig[taskType]?.capability;
+
+  if (
+    model === undefined ||
+    model.capability !== capability ||
+    !Array.isArray(model.supported_task_types) ||
+    !model.supported_task_types.includes(taskType) ||
+    !Array.isArray(model.supported_input_types) ||
+    !model.supported_input_types.includes("image") ||
+    Number(model.max_input_files ?? 0) < 1
+  ) {
+    return false;
+  }
+
+  // 未指定尺寸时只校验参考图能力；进入参数步骤后再校验当前输出尺寸白名单。
+  return (
+    imageSize === null ||
+    !Array.isArray(model.supported_image_sizes) ||
+    model.supported_image_sizes.length === 0 ||
+    model.supported_image_sizes.includes(imageSize)
+  );
 }

@@ -40,20 +40,26 @@ export function formatTaskPoints(task) {
     return "未产生积分记录";
   }
 
+  const numericPoints = Number(task.cost_points);
+  // MySQL DECIMAL 会以字符串返回；展示层去掉无意义的尾随零，但不参与任何积分计算。
+  const displayPoints = Number.isFinite(numericPoints)
+    ? new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 6 }).format(numericPoints)
+    : task.cost_points;
+
   // 根据任务与计费错误状态区分已结算、待对账、已释放和仍处于预占中的积分。
   if (task.status === "succeeded") {
-    return `${task.cost_points} 积分`;
+    return `${displayPoints} 积分`;
   }
 
   if (task.status === "billing_pending" || task.error_code === "BILLING_SETTLE_PENDING") {
-    return `${task.cost_points} 积分（结算待对账）`;
+    return `${displayPoints} 积分（结算待对账）`;
   }
 
   if (task.status === "failed" || task.status === "cancelled") {
     return task.error_code === "BILLING_RELEASE_PENDING"
-      ? `${task.cost_points} 积分（释放待对账）`
-      : `${task.cost_points} 积分（已释放）`;
+      ? `${displayPoints} 积分（释放待对账）`
+      : `${displayPoints} 积分（已释放）`;
   }
 
-  return `${task.cost_points} 积分（已预占）`;
+  return `${displayPoints} 积分（已预占）`;
 }

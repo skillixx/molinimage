@@ -29,6 +29,7 @@ export interface CreateImageTaskRequest {
   imageCount?: number;
   upscaleFactor?: number;
   sourceTaskId?: string;
+  sourceFileId?: string;
   idempotencyKey?: string;
   requestId?: string;
   requestIp?: string;
@@ -109,6 +110,7 @@ export interface ImageTaskStylePresetResolver {
 export interface PublicImageTask {
   id: string;
   source_task_id: string | null;
+  source_file_id: string | null;
   owner_user_id: number;
   task_type: string;
   status: ImageTaskStatus;
@@ -157,16 +159,16 @@ const imageTaskStatuses = new Set<ImageTaskStatus>([
   "cancelled"
 ]);
 
-const allowedTransitions: ReadonlyMap<ImageTaskStatus, readonly ImageTaskStatus[]> = new Map([
-  ["pending", ["billing_reserved", "queued", "failed", "cancelled"]],
-  ["billing_reserved", ["queued", "billing_pending", "failed", "cancelled"]],
-  ["queued", ["running", "failed", "cancelled"]],
-  ["running", ["succeeded", "failed", "billing_pending"]],
-  ["billing_pending", ["succeeded", "failed"]],
-  ["succeeded", []],
-  ["failed", []],
-  ["cancelled", []]
-]);
+const allowedTransitions: Readonly<Record<ImageTaskStatus, readonly ImageTaskStatus[]>> = {
+  pending: ["billing_reserved", "queued", "failed", "cancelled"],
+  billing_reserved: ["queued", "billing_pending", "failed", "cancelled"],
+  queued: ["running", "failed", "cancelled"],
+  running: ["succeeded", "failed", "billing_pending"],
+  billing_pending: ["succeeded", "failed"],
+  succeeded: [],
+  failed: [],
+  cancelled: []
+};
 
 export class ImageTaskService {
   constructor(
@@ -220,7 +222,17 @@ export class ImageTaskService {
         : (resolvedModel?.gatewayCapability ?? null);
     const upscaleFactor = request.upscaleFactor ?? null;
     const sourceTaskId = normalizeOptionalString(request.sourceTaskId);
+    const sourceFileId = normalizeOptionalString(request.sourceFileId);
     const entitlementId = request.entitlementId ?? null;
+
+    if (sourceTaskId === null && sourceFileId !== null) {
+      // 来源文件必须绑定来源任务，避免客户端提交无法验证归属的孤立文件链路。
+      throw new ImageTaskServiceError(
+        "SOURCE_FILE_WITHOUT_TASK",
+        "来源文件必须与来源任务同时提供。",
+        400
+      );
+    }
 
     if (entitlementId !== null && (!Number.isInteger(entitlementId) || entitlementId < 1)) {
       throw new ImageTaskServiceError("ENTITLEMENT_ID_INVALID", "权益 ID 必须是正整数。", 400);
@@ -273,6 +285,7 @@ export class ImageTaskService {
         imageCount,
         upscaleFactor,
         sourceTaskId,
+        sourceFileId,
         entitlementId
       });
 
@@ -332,6 +345,7 @@ export class ImageTaskService {
         ownerUserId: request.ownerUserId,
         taskType,
         sourceTaskId,
+        sourceFileId,
         inputFileIds
       });
     }
@@ -371,6 +385,7 @@ export class ImageTaskService {
     const task = await this.repository.create({
       id: taskId,
       source_task_id: sourceTaskId,
+      source_file_id: sourceFileId,
       owner_user_id: request.ownerUserId,
       entitlement_id: entitlementId,
       task_type: taskType,
@@ -492,6 +507,7 @@ export class ImageTaskService {
       imageCount: sourceTask.image_count,
       upscaleFactor: sourceTask.upscale_factor ?? undefined,
       sourceTaskId: sourceTask.source_task_id ?? undefined,
+      sourceFileId: sourceTask.source_file_id ?? undefined,
       entitlementId,
       requestId: requestContext?.requestId,
       requestIp: requestContext?.requestIp,
@@ -645,6 +661,7 @@ export class ImageTaskService {
     ownerUserId: number;
     taskType: string;
     sourceTaskId: string;
+    sourceFileId: string | null;
     inputFileIds: string[];
   }): Promise<void> {
     if (input.taskType !== "image_to_image") {
@@ -681,11 +698,18 @@ export class ImageTaskService {
       );
     }
 
-    if (
-      input.inputFileIds.length !== 1 ||
-      !sourceTask.output_file_ids.includes(input.inputFileIds[0] ?? "")
-    ) {
-      // 来源关系与输入图必须一致，防止前端伪造 source_task_id 形成错误作品链路。
+    if (input.inputFileIds.length !== 1) {
+      throw new ImageTaskServiceError(
+        "SOURCE_TASK_FILE_MISMATCH",
+        "输入图片不是来源任务的生成结果。",
+        400
+      );
+    }
+
+    const sourceFileId = input.sourceFileId ?? input.inputFileIds[0];
+
+    if (!sourceTask.output_file_ids.includes(sourceFileId)) {
+      // 标注图是新上传文件，不能再要求其 ID 等于原结果；改为单独校验声明的来源文件。
       throw new ImageTaskServiceError(
         "SOURCE_TASK_FILE_MISMATCH",
         "输入图片不是来源任务的生成结果。",
@@ -704,7 +728,7 @@ export class ImageTaskService {
 }
 
 function assertTransitionAllowed(fromStatus: ImageTaskStatus, toStatus: ImageTaskStatus): void {
-  const nextStatuses = allowedTransitions.get(fromStatus) ?? [];
+  const nextStatuses = allowedTransitions[fromStatus];
 
   if (!nextStatuses.includes(toStatus)) {
     throw new ImageTaskServiceError(
@@ -746,6 +770,7 @@ interface NormalizedTaskCreationParameters {
   imageCount: number;
   upscaleFactor: number | null;
   sourceTaskId: string | null;
+  sourceFileId: string | null;
   entitlementId: number | null;
 }
 
@@ -766,6 +791,7 @@ function assertIdempotentTaskMatches(
     existingTask.image_count === input.imageCount &&
     existingTask.upscale_factor === input.upscaleFactor &&
     existingTask.source_task_id === input.sourceTaskId &&
+    existingTask.source_file_id === input.sourceFileId &&
     existingTask.entitlement_id === input.entitlementId;
 
   if (!matches) {
@@ -848,6 +874,7 @@ function toPublicImageTask(task: ImageTaskRecord): PublicImageTask {
   return {
     id: task.id,
     source_task_id: task.source_task_id,
+    source_file_id: task.source_file_id,
     owner_user_id: task.owner_user_id,
     task_type: task.task_type,
     status: task.status,

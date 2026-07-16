@@ -63,10 +63,17 @@ export async function uploadImageFile(input) {
   });
 }
 
-export async function getImageHistory(taskType = "") {
-  const query = taskType.length > 0 ? `?task_type=${encodeURIComponent(taskType)}` : "";
+export async function getImageHistory(taskType = "", page = 1, pageSize = 12) {
+  const query = new URLSearchParams({
+    page: String(page),
+    page_size: String(pageSize)
+  });
 
-  return await requestJson(`/api/image/history${query}`);
+  if (taskType.length > 0) {
+    query.set("task_type", taskType);
+  }
+
+  return await requestJson(`/api/image/history?${query.toString()}`);
 }
 
 export async function favoriteHistoryItem(taskId) {

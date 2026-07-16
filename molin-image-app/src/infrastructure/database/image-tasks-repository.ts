@@ -13,6 +13,7 @@ export type ImageTaskStatus =
 export interface ImageTaskRecord {
   id: string;
   source_task_id: string | null;
+  source_file_id: string | null;
   owner_user_id: number;
   entitlement_id: number | null;
   task_type: string;
@@ -44,6 +45,7 @@ export interface ImageTaskRecord {
 export interface CreateImageTaskRecordInput {
   id: string;
   source_task_id?: string | null;
+  source_file_id?: string | null;
   owner_user_id: number;
   entitlement_id?: number | null;
   task_type: string;
@@ -101,6 +103,7 @@ export interface ImageTasksRepository {
 interface ImageTaskRow extends RowDataPacket {
   id: string;
   source_task_id: string | null;
+  source_file_id: string | null;
   owner_user_id: number;
   entitlement_id: number | null;
   task_type: string;
@@ -138,6 +141,7 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
         `INSERT INTO image_tasks (
         id,
         source_task_id,
+        source_file_id,
         owner_user_id,
         entitlement_id,
         task_type,
@@ -156,10 +160,11 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
         cost_points,
         billing_event_id,
         idempotency_key
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           input.id,
           input.source_task_id ?? null,
+          input.source_file_id ?? null,
           input.owner_user_id,
           input.entitlement_id ?? null,
           input.task_type,
@@ -256,6 +261,7 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
       `SELECT
         id,
         source_task_id,
+        source_file_id,
         owner_user_id,
         entitlement_id,
         task_type,
@@ -435,6 +441,7 @@ function formatSqlLimit(value: number): string {
 const imageTaskSelectSql = `SELECT
   id,
   source_task_id,
+  source_file_id,
   owner_user_id,
   entitlement_id,
   task_type,

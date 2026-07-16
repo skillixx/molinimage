@@ -17,6 +17,7 @@ import type {
   TransitionImageTaskInput
 } from "../src/infrastructure/database/image-tasks-repository.js";
 import {
+  type CreateImageTaskRequest,
   type ImageTaskAuditEvent,
   type ImageTaskModelResolver,
   type ImageTaskStylePresetResolver,
@@ -367,6 +368,50 @@ void test("再次编辑任务必须引用本人成功任务的结果文件并记
       }),
     (error: unknown) =>
       error instanceof ImageTaskServiceError && error.code === "IMAGE_TASK_IDEMPOTENCY_CONFLICT"
+  );
+});
+
+void test("标注后再次编辑允许使用派生 PNG，同时校验原始来源文件", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const service = new ImageTaskService(repository);
+  const source = await service.createTask({
+    ownerUserId: 479,
+    taskType: "text_to_image",
+    prompt: "山谷公路"
+  });
+
+  await service.transitionTask({ ownerUserId: 479, taskId: source.task.id, toStatus: "queued" });
+  await service.transitionTask({ ownerUserId: 479, taskId: source.task.id, toStatus: "running" });
+  await service.transitionTask({
+    ownerUserId: 479,
+    taskId: source.task.id,
+    toStatus: "succeeded",
+    outputFileIds: ["file_source_result_annotated"]
+  });
+
+  // 标注画布会上传一张新的 PNG；sourceFileId 用于证明它从来源任务的哪张结果图派生。
+  const annotatedRequest: CreateImageTaskRequest = {
+    ownerUserId: 479,
+    taskType: "image_to_image",
+    prompt: "按红色方框修改道路",
+    inputFileIds: ["file_annotation_png_001"],
+    sourceTaskId: source.task.id,
+    sourceFileId: "file_source_result_annotated"
+  };
+  const reedit = await service.createTask(annotatedRequest);
+
+  assert.equal(reedit.task.source_task_id, source.task.id);
+  assert.equal(reedit.task.source_file_id, "file_source_result_annotated");
+  assert.deepEqual(reedit.task.input_file_ids, ["file_annotation_png_001"]);
+
+  await assert.rejects(
+    () =>
+      service.createTask({
+        ...annotatedRequest,
+        sourceFileId: "file_not_from_source_task"
+      }),
+    (error: unknown) =>
+      error instanceof ImageTaskServiceError && error.code === "SOURCE_TASK_FILE_MISMATCH"
   );
 });
 
@@ -894,6 +939,7 @@ class InMemoryImageTasksRepository implements ImageTasksRepository {
     const record: ImageTaskRecord = {
       ...input,
       source_task_id: input.source_task_id ?? null,
+      source_file_id: input.source_file_id ?? null,
       entitlement_id: input.entitlement_id ?? null,
       upscale_factor: input.upscale_factor ?? null,
       output_file_ids: [],

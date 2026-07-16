@@ -199,6 +199,16 @@ void test("风格模板 migration 支持分类、预览图、排序启停和默�
   assert.match(downSql, /DROP COLUMN category/i);
 });
 
+void test("标注再次编辑 migration 记录原始来源文件并支持回滚", async () => {
+  const upSql = await readFile(resolve("migrations", "016_add_source_file_id.up.sql"), "utf8");
+  const downSql = await readFile(resolve("migrations", "016_add_source_file_id.down.sql"), "utf8");
+
+  assert.match(upSql, /ADD COLUMN source_file_id VARCHAR\(64\) NULL/i);
+  assert.match(upSql, /idx_image_tasks_source_file_id/i);
+  assert.match(downSql, /DROP INDEX idx_image_tasks_source_file_id/i);
+  assert.match(downSql, /DROP COLUMN source_file_id/i);
+});
+
 void test("风格模板扩充 migration 覆盖三类任务并只回滚新增模板", async () => {
   const upSql = await readFile(resolve("migrations", "014_seed_more_style_presets.up.sql"), "utf8");
   const downSql = await readFile(
@@ -247,7 +257,10 @@ void test("风格模板扩充 migration 覆盖三类任务并只回滚新增模�
   assert.match(upSql, /edit_product_refine/i);
   assert.match(upSql, /restore_portrait_enhance/i);
   assert.match(upSql, /restore_low_light/i);
-  assert.match(upSql, /UPDATE style_presets SET category = 'portrait', sort_order = 60 WHERE id = 'tti_portrait_editorial'/i);
+  assert.match(
+    upSql,
+    /UPDATE style_presets SET category = 'portrait', sort_order = 60 WHERE id = 'tti_portrait_editorial'/i
+  );
 
   for (const templateId of newTemplateIds) {
     assert.match(upSql, new RegExp(templateId, "i"));
@@ -260,7 +273,10 @@ void test("风格模板扩充 migration 覆盖三类任务并只回滚新增模�
 });
 
 void test("图片模型尺寸扩充 migration 让生成和编辑模型支持工作台完整尺寸", async () => {
-  const upSql = await readFile(resolve("migrations", "015_expand_image_model_sizes.up.sql"), "utf8");
+  const upSql = await readFile(
+    resolve("migrations", "015_expand_image_model_sizes.up.sql"),
+    "utf8"
+  );
   const downSql = await readFile(
     resolve("migrations", "015_expand_image_model_sizes.down.sql"),
     "utf8"

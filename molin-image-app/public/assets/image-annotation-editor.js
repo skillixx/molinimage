@@ -7,6 +7,18 @@ export function createImageAnnotationEditor(canvas) {
     throw new Error("当前浏览器不支持图片标注画布。");
   }
 
+  // Node 单元测试没有 document；此时退回传入画布，浏览器中仍使用独立透明图层。
+  const annotationLayer =
+    typeof document === "undefined" ? canvas : document.createElement("canvas");
+  const annotationContext = annotationLayer.getContext("2d");
+  const hasSeparateAnnotationLayer = annotationLayer !== canvas;
+
+  if (annotationContext === null) {
+    throw new Error("当前浏览器不支持图片标注图层。");
+  }
+
+  let drawContext = annotationContext;
+
   const state = {
     image: null,
     imageObjectUrl: null,
@@ -44,11 +56,15 @@ export function createImageAnnotationEditor(canvas) {
     );
     canvas.width = Math.max(1, Math.round(state.image.naturalWidth * scale));
     canvas.height = Math.max(1, Math.round(state.image.naturalHeight * scale));
+    if (hasSeparateAnnotationLayer) {
+      annotationLayer.width = canvas.width;
+      annotationLayer.height = canvas.height;
+    }
     redraw();
   }
 
   function setTool(tool) {
-    if (!new Set(["brush", "rectangle", "marker"]).has(tool)) {
+    if (!new Set(["brush", "rectangle", "marker", "eraser"]).has(tool)) {
       return;
     }
 
@@ -129,7 +145,7 @@ export function createImageAnnotationEditor(canvas) {
             width: state.width
           }
         : {
-            type: "brush",
+            type: state.tool,
             points: [point],
             color: state.color,
             width: state.width
@@ -176,6 +192,11 @@ export function createImageAnnotationEditor(canvas) {
 
     context.drawImage(state.image, 0, 0, canvas.width, canvas.height);
 
+    if (hasSeparateAnnotationLayer) {
+      annotationContext.clearRect(0, 0, annotationLayer.width, annotationLayer.height);
+    }
+    drawContext = annotationContext;
+
     for (const operation of state.operations) {
       drawOperation(operation);
     }
@@ -183,15 +204,24 @@ export function createImageAnnotationEditor(canvas) {
     if (state.draft !== null) {
       drawOperation(state.draft);
     }
+
+    // 标注独立绘制在透明图层上，橡皮擦只清除标注，不会破坏用户原图。
+    drawContext = context;
+    if (hasSeparateAnnotationLayer) {
+      context.drawImage(annotationLayer, 0, 0);
+    }
   }
 
   function drawOperation(operation) {
-    context.save();
-    context.lineCap = "round";
-    context.lineJoin = "round";
-    context.strokeStyle = operation.color;
+    drawContext.save();
+    drawContext.lineCap = "round";
+    drawContext.lineJoin = "round";
+    drawContext.strokeStyle = operation.color;
 
-    if (operation.type === "brush") {
+    if (operation.type === "brush" || operation.type === "eraser") {
+      if (operation.type === "eraser") {
+        drawContext.globalCompositeOperation = "destination-out";
+      }
       drawBrush(operation);
     } else if (operation.type === "rectangle") {
       drawRectangle(operation);
@@ -199,7 +229,7 @@ export function createImageAnnotationEditor(canvas) {
       drawMarker(operation);
     }
 
-    context.restore();
+    drawContext.restore();
   }
 
   function drawBrush(operation) {
@@ -207,15 +237,15 @@ export function createImageAnnotationEditor(canvas) {
       return;
     }
 
-    context.lineWidth = operation.width;
-    context.beginPath();
-    context.moveTo(operation.points[0].x, operation.points[0].y);
+    drawContext.lineWidth = operation.type === "eraser" ? operation.width * 2 : operation.width;
+    drawContext.beginPath();
+    drawContext.moveTo(operation.points[0].x, operation.points[0].y);
 
     for (const point of operation.points.slice(1)) {
-      context.lineTo(point.x, point.y);
+      drawContext.lineTo(point.x, point.y);
     }
 
-    context.stroke();
+    drawContext.stroke();
   }
 
   function drawRectangle(operation) {
@@ -224,29 +254,29 @@ export function createImageAnnotationEditor(canvas) {
     const width = Math.abs(operation.end.x - operation.start.x);
     const height = Math.abs(operation.end.y - operation.start.y);
 
-    context.lineWidth = operation.width;
-    context.globalAlpha = 0.18;
-    context.fillStyle = operation.color;
-    context.fillRect(x, y, width, height);
-    context.globalAlpha = 1;
-    context.strokeRect(x, y, width, height);
+    drawContext.lineWidth = operation.width;
+    drawContext.globalAlpha = 0.18;
+    drawContext.fillStyle = operation.color;
+    drawContext.fillRect(x, y, width, height);
+    drawContext.globalAlpha = 1;
+    drawContext.strokeRect(x, y, width, height);
   }
 
   function drawMarker(operation) {
     const radius = Math.max(16, Math.min(canvas.width, canvas.height) * 0.025);
 
-    context.fillStyle = operation.color;
-    context.beginPath();
-    context.arc(operation.point.x, operation.point.y, radius, 0, Math.PI * 2);
-    context.fill();
-    context.lineWidth = Math.max(2, radius * 0.12);
-    context.strokeStyle = "#ffffff";
-    context.stroke();
-    context.fillStyle = "#ffffff";
-    context.font = `700 ${String(Math.round(radius * 1.15))}px sans-serif`;
-    context.textAlign = "center";
-    context.textBaseline = "middle";
-    context.fillText(String(operation.number), operation.point.x, operation.point.y + 1);
+    drawContext.fillStyle = operation.color;
+    drawContext.beginPath();
+    drawContext.arc(operation.point.x, operation.point.y, radius, 0, Math.PI * 2);
+    drawContext.fill();
+    drawContext.lineWidth = Math.max(2, radius * 0.12);
+    drawContext.strokeStyle = "#ffffff";
+    drawContext.stroke();
+    drawContext.fillStyle = "#ffffff";
+    drawContext.font = `700 ${String(Math.round(radius * 1.15))}px sans-serif`;
+    drawContext.textAlign = "center";
+    drawContext.textBaseline = "middle";
+    drawContext.fillText(String(operation.number), operation.point.x, operation.point.y + 1);
   }
 
   function resolveCanvasPoint(event) {

@@ -40,11 +40,7 @@ export class PromptOptimizationService {
     const prompt = request.prompt.trim();
 
     if (prompt.length === 0) {
-      throw new PromptOptimizationServiceError(
-        "PROMPT_REQUIRED",
-        "请输入需要优化的提示词。",
-        400
-      );
+      throw new PromptOptimizationServiceError("PROMPT_REQUIRED", "请输入需要优化的提示词。", 400);
     }
 
     if (prompt.length > maxPromptLength) {

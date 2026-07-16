@@ -231,6 +231,7 @@ void test("图生图任务创建会校验输入文件并返回输入图与输出
         style_preset_id: "change_background",
         input_file_ids: ["file_input_001"],
         source_task_id: "task_history_source_001",
+        source_file_id: "file_source_result_001",
         gateway_model_code: "image-edit-default",
         gateway_capability: "image_edit",
         image_size: "1024x1024",
@@ -250,6 +251,7 @@ void test("图生图任务创建会校验输入文件并返回输入图与输出
     assert.equal(imageTaskService.createRequests[0]?.taskType, "image_to_image");
     assert.equal(imageTaskService.createRequests[0]?.stylePresetId, "change_background");
     assert.equal(imageTaskService.createRequests[0]?.sourceTaskId, "task_history_source_001");
+    assert.equal(imageTaskService.createRequests[0]?.sourceFileId, "file_source_result_001");
     assert.equal(imageTaskService.createRequests[0]?.gatewayCapability, "image_edit");
     assert.equal(imageGenerationWorkerService.taskIds[0], "task_api_001");
     assert.equal(body.task.status, "succeeded");
@@ -469,12 +471,7 @@ void test("失败任务重试接口按当前 session 用户创建 retry task 并
 void test("提示词优化接口必须登录，并按当前 session 用户选择模型优化", async () => {
   const imageTaskService = new FakeImageTaskService();
   const promptOptimizationService = new FakePromptOptimizationService();
-  const app = await startTestApp(
-    imageTaskService,
-    undefined,
-    undefined,
-    promptOptimizationService
-  );
+  const app = await startTestApp(imageTaskService, undefined, undefined, promptOptimizationService);
 
   try {
     const unauthorizedResponse = await fetch(`${app.baseUrl}/api/image/prompts/optimize`, {
@@ -542,7 +539,8 @@ class FakeImageTaskService {
         ...createTaskResult("task_api_001", request.ownerUserId, "billing_reserved"),
         task_type: request.taskType,
         upscale_factor: request.upscaleFactor ?? null,
-        source_task_id: request.sourceTaskId ?? null
+        source_task_id: request.sourceTaskId ?? null,
+        source_file_id: request.sourceFileId ?? null
       }
     });
   }
@@ -826,6 +824,7 @@ function createTaskResult(
     image_count: 1,
     upscale_factor: null,
     source_task_id: null,
+    source_file_id: null,
     cost_points: null,
     billing_event_id: null,
     error_code: null,
