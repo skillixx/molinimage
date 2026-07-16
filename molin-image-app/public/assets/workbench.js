@@ -14,6 +14,11 @@ import {
 } from "./api-client.js";
 import { createImageAnnotationEditor } from "./image-annotation-editor.js";
 import {
+  createImageTaskPoller,
+  isTerminalImageTaskStatus,
+  resolveImageTaskProgressStage
+} from "./image-task-poller.js";
+import {
   composeImageRestorePrompt,
   createImageRestoreParameterValues,
   getImageRestoreMode,
@@ -51,6 +56,8 @@ const state = {
   estimate: null,
   estimateRequestId: 0,
   isSubmitting: false,
+  activeTaskId: null,
+  activeTaskType: null,
   referenceFileId: null,
   referencePreviewUrl: null,
   sourceTaskId: null,
@@ -103,9 +110,7 @@ const elements = {
   imageRestoreSteps: document.querySelector("#imageRestoreSteps"),
   creationSteps: Array.from(document.querySelectorAll("[data-creation-step]")),
   imageEditSteps: Array.from(document.querySelectorAll("[data-image-edit-step]")),
-  imageRestoreStepButtons: Array.from(
-    document.querySelectorAll("[data-image-restore-step]")
-  ),
+  imageRestoreStepButtons: Array.from(document.querySelectorAll("[data-image-restore-step]")),
   creationContentBlock: document.querySelector("#creationContentBlock"),
   modeOptionsBlock: document.querySelector("#modeOptionsBlock"),
   parameterBlock: document.querySelector("#parameterBlock"),
@@ -177,9 +182,7 @@ const elements = {
   imageRestoreModelChoices: document.querySelector("#imageRestoreModelChoices"),
   imageRestoreDynamicHint: document.querySelector("#imageRestoreDynamicHint"),
   imageRestoreDynamicParameters: document.querySelector("#imageRestoreDynamicParameters"),
-  imageRestoreOutputPolicyChoices: document.querySelector(
-    "#imageRestoreOutputPolicyChoices"
-  ),
+  imageRestoreOutputPolicyChoices: document.querySelector("#imageRestoreOutputPolicyChoices"),
   imageRestoreSizeChoices: document.querySelector("#imageRestoreSizeChoices"),
   imageRestoreCountChoices: document.querySelector("#imageRestoreCountChoices"),
   openRestoreMaskEditor: document.querySelector("#openRestoreMaskEditor"),
@@ -228,6 +231,25 @@ const elements = {
 };
 
 const annotationEditor = createImageAnnotationEditor(elements.annotationCanvas);
+const activeTaskStorageKey = "molinimage:active-image-task:v1";
+const pendingSubmissionStorageKey = "molinimage:pending-image-submission:v1";
+const imageTaskPoller = createImageTaskPoller({
+  loadTask: getImageTask,
+  onTask: handlePolledImageTask,
+  onTransientError: handleTaskPollingError,
+  onTerminalError: handleTaskPollingTerminalError
+});
+
+window.addEventListener("pagehide", () => {
+  // 页面离开时停止定时器；任务 ID 已持久化，重新进入后会继续恢复。
+  imageTaskPoller.stop();
+});
+window.addEventListener("online", () => {
+  // 离线刷新导致初始化失败时，网络恢复后重新建立会话上下文并恢复待提交任务。
+  if (state.activeTaskId === null && readPendingSubmission() !== null) {
+    void bootstrapWorkbench();
+  }
+});
 
 elements.refreshButton.addEventListener("click", () => {
   void bootstrapWorkbench();
@@ -477,6 +499,11 @@ for (const tab of elements.modeTabs) {
       return;
     }
 
+    if (state.activeTaskId !== null) {
+      showError("当前任务仍在处理中，完成后即可切换其他创作能力。");
+      return;
+    }
+
     const previousMode = state.mode;
 
     if (previousMode === "text_to_image" && nextMode !== "text_to_image") {
@@ -508,18 +535,7 @@ for (const tab of elements.modeTabs) {
       elements.restoreTypeSelect.value = getImageRestoreMode("smart_restore").backend_preset_id;
     }
     elements.resultList.replaceChildren();
-    renderMode();
-    renderModelOptions();
-    renderImageSizeOptions();
-    renderImageSizeGuide();
-    renderStylePresetOptions();
-    if (nextMode === "text_to_image") {
-      restoreTextToImageDraft();
-    }
-    renderStylePresetList();
-    renderTextToImageWorkflow();
-    renderImageToImageWorkflow();
-    renderImageRestoreWorkflow();
+    renderActiveModeControls({ restoreTextDraft: nextMode === "text_to_image" });
     renderProgress("idle");
     void refreshEstimate();
     void refreshHistory();
@@ -561,6 +577,7 @@ function syncParameterPanelToggle(isCollapsed) {
 async function bootstrapWorkbench() {
   clearError();
   setModelHealth("模型加载中", "loading");
+  restoreActiveImageTask();
 
   try {
     const [user, modelCatalog, stylePresetCatalog] = await Promise.all([
@@ -583,8 +600,11 @@ async function bootstrapWorkbench() {
     renderStylePresetList();
     renderImageRestoreWorkflow();
     renderModelList(modelCatalog);
-    renderProgress("idle");
+    renderProgress(state.activeTaskId === null ? "idle" : "generating");
     await Promise.all([refreshEstimate(), refreshHistory()]);
+    if (state.activeTaskId === null && readPendingSubmission() !== null) {
+      void resumePendingImageTaskSubmission();
+    }
     openInitialTaskDetailFromUrl();
   } catch (error) {
     elements.sessionSummary.textContent = "未建立应用会话";
@@ -599,9 +619,23 @@ async function bootstrapWorkbench() {
     renderStylePresetList();
     renderImageRestoreWorkflow();
     renderModelList({ items: [], message: "请从墨灵平台进入应用后重试。" });
-    renderProgress("idle");
+    renderProgress(state.activeTaskId === null ? "idle" : "generating");
     showError(error instanceof Error ? error.message : "工作台加载失败。");
   }
+}
+
+function renderActiveModeControls({ restoreTextDraft = false } = {}) {
+  // 模式切换与刷新恢复共用同一渲染入口，避免控件、尺寸和模板状态发生漂移。
+  renderMode();
+  renderModelOptions();
+  renderImageSizeOptions();
+  renderImageSizeGuide();
+  renderStylePresetOptions();
+  if (restoreTextDraft) restoreTextToImageDraft();
+  renderStylePresetList();
+  renderTextToImageWorkflow();
+  renderImageToImageWorkflow();
+  renderImageRestoreWorkflow();
 }
 
 function openInitialTaskDetailFromUrl() {
@@ -703,7 +737,7 @@ function syncPromptFieldPlacement() {
       ? elements.imageToImagePromptSlot
       : state.mode === "image_restore"
         ? elements.imageRestorePromptSlot
-      : elements.creationContentBlock;
+        : elements.creationContentBlock;
 
   if (elements.promptField.parentElement !== target) {
     // 图生图和图片修复在第三步填写说明，其余模式仍放在创作内容区，避免维护两套输入值。
@@ -875,10 +909,7 @@ function validateImageRestoreStep(step) {
 
   if (step === 3) {
     const mode = getImageRestoreMode(state.imageRestoreModeCode);
-    const modeValidation = validateImageRestoreMode(
-      mode,
-      state.imageRestoreAnnotationApplied
-    );
+    const modeValidation = validateImageRestoreMode(mode, state.imageRestoreAnnotationApplied);
 
     if (!modeValidation.valid) {
       return modeValidation;
@@ -1104,11 +1135,7 @@ function renderImageRestoreModelChoices() {
 
 function isSelectedImageRestoreModelCompatible() {
   const model = currentSelectedModel();
-  return isReferenceImageTaskModelCompatible(
-    model,
-    "image_restore",
-    elements.sizeSelect.value
-  );
+  return isReferenceImageTaskModelCompatible(model, "image_restore", elements.sizeSelect.value);
 }
 
 function renderImageRestoreDynamicParameters() {
@@ -1785,12 +1812,12 @@ function syncPromptInputState() {
       ? "修改说明已填写，将与模式参数一起提交"
       : state.mode === "image_restore"
         ? "补充说明已填写，将与修复参数一起提交"
-      : "提示词已填写，可以继续选择风格"
+        : "提示词已填写，可以继续选择风格"
     : state.mode === "image_to_image"
       ? "请描述需要保留、替换或增强的画面部分"
       : state.mode === "image_restore"
         ? "补充说明可选，系统会按修复方式和推荐参数处理"
-      : "请输入想生成的主体、场景或画面效果";
+        : "请输入想生成的主体、场景或画面效果";
   elements.promptValidationMessage.dataset.tone = isValid ? "ready" : "muted";
 
   if (!isValid) {
@@ -1991,6 +2018,191 @@ async function handleTaskSubmitError(error, fallbackMessage) {
   showError(error instanceof Error ? error.message : fallbackMessage);
 }
 
+function createSubmissionIdempotencyKey() {
+  if (typeof window.crypto?.randomUUID === "function") {
+    return `image-task-${window.crypto.randomUUID()}`;
+  }
+
+  return `image-task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+async function createQueuedImageTask(input) {
+  let pendingSubmission = readPendingSubmission();
+
+  if (pendingSubmission === null) {
+    if (input === undefined) throw new Error("没有可恢复的待提交任务。");
+    pendingSubmission = {
+      idempotency_key: createSubmissionIdempotencyKey(),
+      task_type: input.task_type,
+      input
+    };
+    // 在发起 POST 前保存完整提交边界，刷新后必须复用同一幂等键和输入文件 ID。
+    window.sessionStorage.setItem(pendingSubmissionStorageKey, JSON.stringify(pendingSubmission));
+  }
+
+  const result = await createImageTask(pendingSubmission.input, {
+    idempotencyKey: pendingSubmission.idempotency_key
+  });
+
+  // 服务端已返回任务 ID 后才清除待提交记录；响应丢失时刷新可安全重放原请求。
+  window.sessionStorage.removeItem(pendingSubmissionStorageKey);
+  return result;
+}
+
+function readPendingSubmission() {
+  const rawValue = window.sessionStorage.getItem(pendingSubmissionStorageKey);
+  if (rawValue === null) return null;
+
+  try {
+    const saved = JSON.parse(rawValue);
+    if (
+      typeof saved.idempotency_key !== "string" ||
+      typeof saved.task_type !== "string" ||
+      saved.input === null ||
+      typeof saved.input !== "object" ||
+      saved.input.task_type !== saved.task_type
+    ) {
+      throw new Error("invalid pending submission");
+    }
+    return saved;
+  } catch {
+    window.sessionStorage.removeItem(pendingSubmissionStorageKey);
+    return null;
+  }
+}
+
+async function resumePendingImageTaskSubmission() {
+  const pendingSubmission = readPendingSubmission();
+  if (pendingSubmission === null || state.isSubmitting || state.activeTaskId !== null) return;
+
+  if (modeConfig[pendingSubmission.task_type] !== undefined) {
+    state.mode = pendingSubmission.task_type;
+    renderActiveModeControls();
+  }
+
+  clearError();
+  setSubmitting(true, "正在恢复上次未确认的任务提交");
+  renderProgress("reserving");
+  try {
+    acceptAsyncImageTask(await createQueuedImageTask());
+  } catch (error) {
+    if (isPermanentSubmissionError(error)) {
+      window.sessionStorage.removeItem(pendingSubmissionStorageKey);
+    }
+    await handleTaskSubmitError(error, "任务提交恢复失败。");
+  } finally {
+    setSubmitting(false);
+  }
+}
+
+function isPermanentSubmissionError(error) {
+  const status = Number(error?.status);
+  return (
+    Number.isFinite(status) && status >= 400 && status < 500 && status !== 408 && status !== 429
+  );
+}
+
+function acceptAsyncImageTask(result) {
+  state.activeTaskId = result.task.id;
+  state.activeTaskType = result.task.task_type;
+  window.localStorage.setItem(
+    activeTaskStorageKey,
+    JSON.stringify({ task_id: result.task.id, task_type: result.task.task_type })
+  );
+  renderProgress(resolveImageTaskProgressStage(result.task.status));
+  elements.actionHint.textContent = `任务 ${result.task.id} 已进入队列，正在等待处理`;
+  updatePrimaryActionState();
+
+  if (isTerminalImageTaskStatus(result.task.status)) {
+    void handlePolledImageTask(result);
+    return;
+  }
+
+  imageTaskPoller.start(result.task.id);
+}
+
+async function handlePolledImageTask(result) {
+  const { task } = result;
+  const stage = resolveImageTaskProgressStage(task.status);
+
+  renderProgress(stage);
+  elements.actionHint.textContent = resolveAsyncTaskStatusText(task);
+
+  // 结算待处理时结果文件已经生成，可以先展示；轮询继续等待最终结算状态。
+  if (isTerminalImageTaskStatus(task.status) || task.status === "billing_pending") {
+    renderTaskResult(result);
+  }
+
+  if (!isTerminalImageTaskStatus(task.status)) {
+    return;
+  }
+
+  state.activeTaskId = null;
+  state.activeTaskType = null;
+  window.localStorage.removeItem(activeTaskStorageKey);
+  updatePrimaryActionState();
+  await Promise.all([refreshEstimate(), refreshHistory()]);
+}
+
+function handleTaskPollingError() {
+  elements.actionHint.textContent = "网络连接暂时不可用，正在自动恢复任务状态";
+}
+
+function handleTaskPollingTerminalError(error) {
+  state.activeTaskId = null;
+  state.activeTaskType = null;
+  window.localStorage.removeItem(activeTaskStorageKey);
+  renderProgress("failed");
+  if (state.mode !== "image_to_text") renderGenerationFailure();
+  updatePrimaryActionState();
+  showError(error instanceof Error ? error.message : "任务状态无法继续查询，请重新进入工作台。");
+}
+
+function resolveAsyncTaskStatusText(task) {
+  const labels = {
+    pending: "正在创建任务",
+    billing_reserved: "积分已预占，等待进入队列",
+    queued: "任务已排队，等待 Worker 处理",
+    running: "AI 正在处理任务",
+    billing_pending: "结果已生成，积分正在结算",
+    succeeded: "任务已完成",
+    failed: "任务处理失败",
+    cancelled: "任务已取消"
+  };
+
+  return `任务 ${task.id}：${labels[task.status] ?? "正在处理"}`;
+}
+
+function restoreActiveImageTask() {
+  const rawValue = window.localStorage.getItem(activeTaskStorageKey);
+  if (rawValue === null) return;
+
+  try {
+    const saved = JSON.parse(rawValue);
+    if (typeof saved.task_id !== "string" || saved.task_id.length === 0) {
+      throw new Error("invalid task id");
+    }
+
+    if (typeof saved.task_type === "string" && modeConfig[saved.task_type] !== undefined) {
+      state.mode = saved.task_type;
+      renderActiveModeControls();
+    }
+
+    state.activeTaskId = saved.task_id;
+    state.activeTaskType =
+      typeof saved.task_type === "string" && modeConfig[saved.task_type] !== undefined
+        ? saved.task_type
+        : null;
+    setSubmitting(true, "正在恢复未完成的图片任务");
+    setSubmitting(false);
+    renderProgress("generating");
+    updatePrimaryActionState();
+    imageTaskPoller.start(saved.task_id);
+  } catch {
+    window.localStorage.removeItem(activeTaskStorageKey);
+  }
+}
+
 async function optimizeCurrentPrompt() {
   clearError();
 
@@ -2039,6 +2251,17 @@ async function optimizeCurrentPrompt() {
 }
 
 async function submitCurrentTask() {
+  if (state.isSubmitting || state.activeTaskId !== null) {
+    showError("当前已有任务正在处理，请等待完成后再创建新任务。");
+    return;
+  }
+
+  if (readPendingSubmission() !== null) {
+    // 上次 POST 结果未知时优先重放原请求，禁止重新上传文件或生成新的幂等键。
+    await resumePendingImageTaskSubmission();
+    return;
+  }
+
   if (state.mode === "text_to_image") {
     await submitTextToImageTask();
     return;
@@ -2087,7 +2310,7 @@ async function submitTextToImageTask() {
   renderProgress("generating");
 
   try {
-    const result = await createImageTask({
+    const result = await createQueuedImageTask({
       ...currentPricingExpectation(),
       task_type: "text_to_image",
       prompt,
@@ -2099,10 +2322,7 @@ async function submitTextToImageTask() {
       image_count: Number(elements.countSelect.value)
     });
 
-    renderTaskResult(result);
-    renderProgress(result.task.status === "failed" ? "failed" : "completed");
-    elements.actionHint.textContent = `任务 ${result.task.id} 已完成`;
-    await Promise.all([refreshEstimate(), refreshHistory()]);
+    acceptAsyncImageTask(result);
   } catch (error) {
     await handleTaskSubmitError(error, "文生图任务提交失败。");
   } finally {
@@ -2137,7 +2357,7 @@ async function submitImageToTextTask() {
       file_type: "input"
     });
     renderProgress("generating");
-    const result = await createImageTask({
+    const result = await createQueuedImageTask({
       ...currentPricingExpectation(),
       task_type: "image_to_text",
       prompt: undefined,
@@ -2147,10 +2367,7 @@ async function submitImageToTextTask() {
       image_count: 1
     });
 
-    renderTaskResult(result);
-    renderProgress(result.task.status === "failed" ? "failed" : "completed");
-    elements.actionHint.textContent = `任务 ${result.task.id} 已完成`;
-    await Promise.all([refreshEstimate(), refreshHistory()]);
+    acceptAsyncImageTask(result);
   } catch (error) {
     await handleTaskSubmitError(error, "图生文任务提交失败。");
   } finally {
@@ -2209,7 +2426,7 @@ async function submitImageToImageTask() {
     }
 
     renderProgress("generating");
-    const result = await createImageTask({
+    const result = await createQueuedImageTask({
       ...currentPricingExpectation(),
       task_type: "image_to_image",
       prompt,
@@ -2226,10 +2443,7 @@ async function submitImageToImageTask() {
       source_file_id: state.sourceFileId
     });
 
-    renderTaskResult(result);
-    renderProgress(result.task.status === "failed" ? "failed" : "completed");
-    elements.actionHint.textContent = `任务 ${result.task.id} 已完成`;
-    await Promise.all([refreshEstimate(), refreshHistory()]);
+    acceptAsyncImageTask(result);
   } catch (error) {
     await handleTaskSubmitError(error, "图生图任务提交失败。");
   } finally {
@@ -2292,7 +2506,7 @@ async function submitImageRestoreTask() {
     }
 
     renderProgress("generating");
-    const result = await createImageTask({
+    const result = await createQueuedImageTask({
       ...currentPricingExpectation(),
       task_type: "image_restore",
       prompt,
@@ -2307,10 +2521,7 @@ async function submitImageRestoreTask() {
       source_file_id: state.sourceFileId
     });
 
-    renderTaskResult(result);
-    renderProgress(result.task.status === "failed" ? "failed" : "completed");
-    elements.actionHint.textContent = `修复任务 ${result.task.id} 已完成`;
-    await Promise.all([refreshEstimate(), refreshHistory()]);
+    acceptAsyncImageTask(result);
   } catch (error) {
     await handleTaskSubmitError(error, "图片修复任务提交失败。");
   } finally {
@@ -2352,7 +2563,7 @@ async function submitUpscaleTask() {
     });
 
     renderProgress("generating");
-    const result = await createImageTask({
+    const result = await createQueuedImageTask({
       ...currentPricingExpectation(),
       task_type: "upscale",
       upscale_factor: upscaleFactor,
@@ -2362,10 +2573,7 @@ async function submitUpscaleTask() {
       image_count: 1
     });
 
-    renderTaskResult(result);
-    renderProgress(result.task.status === "failed" ? "failed" : "completed");
-    elements.actionHint.textContent = `放大任务 ${result.task.id} 已完成`;
-    await Promise.all([refreshEstimate(), refreshHistory()]);
+    acceptAsyncImageTask(result);
   } catch (error) {
     await handleTaskSubmitError(error, "高清放大任务提交失败。");
   } finally {
@@ -2484,7 +2692,7 @@ function renderGenerationFailure() {
 function renderTaskResult(result) {
   elements.resultList.replaceChildren();
 
-  if (result.task.status === "failed") {
+  if (result.task.status === "failed" || result.task.status === "cancelled") {
     elements.resultList.append(createFailedResultCard(result.task));
     return;
   }
@@ -2498,9 +2706,7 @@ function renderTaskResult(result) {
   const inputFiles = result.input_files ?? [];
 
   if (result.task.task_type === "image_restore" && inputFiles.length > 0 && files.length > 0) {
-    elements.resultList.append(
-      createImageRestoreComparison(inputFiles[0], files[0], result.task)
-    );
+    elements.resultList.append(createImageRestoreComparison(inputFiles[0], files[0], result.task));
     for (const file of files.slice(1)) {
       elements.resultList.append(createImageResultCard(file, result.task));
     }
@@ -2676,24 +2882,24 @@ function createFailedResultCard(task) {
   const actions = document.createElement("div");
 
   item.className = "failed-result";
-  title.textContent = "生成失败，积分已释放";
+  title.textContent = task.status === "cancelled" ? "任务已取消" : "生成失败，积分已释放";
   message.textContent = resolveTaskFailureMessage(task);
-  retryButton.type = "button";
-  retryButton.className = "primary-button";
-  retryButton.textContent = "重试";
-  retryButton.addEventListener("click", async () => {
-    await runHistoryAction(retryButton, "重试中", async () => {
-      const retryResult = await retryImageTask(task.id);
+  if (task.status === "failed") {
+    retryButton.type = "button";
+    retryButton.className = "primary-button";
+    retryButton.textContent = "重试";
+    retryButton.addEventListener("click", async () => {
+      await runHistoryAction(retryButton, "重试中", async () => {
+        const retryResult = await retryImageTask(task.id);
 
-      renderTaskResult(retryResult);
-      renderProgress(retryResult.task.status === "failed" ? "failed" : "completed");
-      elements.actionHint.textContent = `重试任务 ${retryResult.task.id} 已处理`;
-      await Promise.all([refreshEstimate(), refreshHistory()]);
+        acceptAsyncImageTask(retryResult);
+      });
     });
-  });
+  }
 
   actions.className = "result-actions";
-  actions.append(retryButton, detailButton);
+  if (task.status === "failed") actions.append(retryButton);
+  actions.append(detailButton);
   item.append(title, message, actions);
 
   return item;
@@ -2725,7 +2931,9 @@ function renderProgress(stage) {
 }
 
 function resolveProgressSteps() {
-  if (state.mode === "image_restore") {
+  const progressMode = state.activeTaskType ?? state.mode;
+
+  if (progressMode === "image_restore") {
     return [
       { id: "upload", label: "上传图片" },
       { id: "reserve", label: "预占积分" },
@@ -2736,7 +2944,7 @@ function resolveProgressSteps() {
     ];
   }
 
-  if (state.mode === "image_to_image") {
+  if (progressMode === "image_to_image") {
     return [
       { id: "upload", label: "上传图片" },
       { id: "reserve", label: "预占积分" },
@@ -2746,26 +2954,28 @@ function resolveProgressSteps() {
     ];
   }
 
-  if (
-    state.mode === "image_to_text" || state.mode === "upscale"
-  ) {
+  if (progressMode === "image_to_text" || progressMode === "upscale") {
     return [
       { id: "upload", label: "上传图片" },
       { id: "reserve", label: "预占积分" },
       {
         id: "generate",
         label:
-          state.mode === "image_to_text"
+          progressMode === "image_to_text"
             ? "生成文本"
-            : state.mode === "image_restore"
+            : progressMode === "image_restore"
               ? "修复图片"
-              : state.mode === "upscale"
+              : progressMode === "upscale"
                 ? "高清放大"
                 : "编辑图片"
       },
       {
+        id: "store",
+        label: progressMode === "image_to_text" ? "保存文本" : "保存结果"
+      },
+      {
         id: "result",
-        label: state.mode === "image_to_text" ? "结果可复制" : "结果可下载"
+        label: progressMode === "image_to_text" ? "结果可复制" : "结果可下载"
       }
     ];
   }
@@ -2783,7 +2993,9 @@ function resolveProgressStatus(stepId, stage) {
   const activeStepByStage = {
     idle: "",
     uploading: "upload",
+    reserving: "reserve",
     generating: "generate",
+    saving: "store",
     completed: "result",
     failed: ""
   };
@@ -2823,7 +3035,7 @@ function progressStatusText(status) {
 }
 
 function updatePrimaryActionState() {
-  if (state.isSubmitting) {
+  if (state.isSubmitting || state.activeTaskId !== null) {
     elements.primaryAction.disabled = true;
     syncTextToImageWorkflowControls();
     syncImageToImageWorkflowControls();
@@ -2836,8 +3048,7 @@ function updatePrimaryActionState() {
   const hasModel = elements.modelSelect.value.length > 0;
 
   const imageEditInvalid = state.mode === "image_to_image" && !validateImageToImageStep(3).valid;
-  const imageRestoreInvalid =
-    state.mode === "image_restore" && !validateImageRestoreStep(3).valid;
+  const imageRestoreInvalid = state.mode === "image_restore" && !validateImageRestoreStep(3).valid;
   elements.primaryAction.disabled =
     estimateUnavailable ||
     !hasEnoughBalance ||
@@ -3812,8 +4023,7 @@ function renderHistory(items, append = false) {
         useSourceButton.type = "button";
         useSourceButton.className = "ghost-button history-use-source-button";
         useSourceButton.textContent = "用作原图";
-        useSourceButton.hidden =
-          state.mode !== "image_to_image" && state.mode !== "image_restore";
+        useSourceButton.hidden = state.mode !== "image_to_image" && state.mode !== "image_restore";
         useSourceButton.addEventListener("click", () => {
           selectHistoryImageSource(task, file);
         });
@@ -4211,8 +4421,7 @@ function setModelHealth(text, tone) {
 }
 
 function renderUploadHint() {
-  const isInteractiveImageMode =
-    state.mode === "image_to_image" || state.mode === "image_restore";
+  const isInteractiveImageMode = state.mode === "image_to_image" || state.mode === "image_restore";
   const hasImage = hasCurrentImageInput();
   elements.imageToImageUploadActions.hidden = !isInteractiveImageMode;
   elements.replaceImageButton.hidden = !isInteractiveImageMode || !hasImage;

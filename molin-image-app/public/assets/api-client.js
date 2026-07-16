@@ -39,9 +39,13 @@ export async function getBillingRecords(page = 1, pageSize = 20) {
   return await requestJson(`/api/billing/records?${query.toString()}`);
 }
 
-export async function createImageTask(input) {
+export async function createImageTask(input, options = {}) {
   return await requestJson("/api/image/tasks", {
     method: "POST",
+    headers:
+      options.idempotencyKey === undefined
+        ? undefined
+        : { "idempotency-key": options.idempotencyKey },
     body: JSON.stringify(input)
   });
 }
@@ -95,7 +99,8 @@ async function requestJson(path, options = {}) {
     credentials: "same-origin",
     headers: {
       accept: "application/json",
-      ...(options.body === undefined ? {} : { "content-type": "application/json" })
+      ...(options.body === undefined ? {} : { "content-type": "application/json" }),
+      ...(options.headers ?? {})
     },
     body: options.body
   });
@@ -107,6 +112,7 @@ async function requestJson(path, options = {}) {
 
     // 保留后端公开错误码，工作台可据此执行重新估价等安全恢复动作。
     error.code = payload?.error?.code ?? "REQUEST_FAILED";
+    error.status = response.status;
     throw error;
   }
 

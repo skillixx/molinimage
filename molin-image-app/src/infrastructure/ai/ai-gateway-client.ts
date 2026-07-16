@@ -26,6 +26,7 @@ export interface GenerateImageInput {
   model: string;
   size: string;
   count: number;
+  signal?: AbortSignal;
 }
 
 export interface GeneratedImage {
@@ -50,6 +51,7 @@ export interface EditImageInput {
   model: string;
   size: string;
   count: number;
+  signal?: AbortSignal;
 }
 
 export type EditImageResult = GenerateImageResult;
@@ -63,6 +65,7 @@ export interface AnalyzeImageInput {
   imageMimeType: string;
   prompt: string;
   model: string;
+  signal?: AbortSignal;
 }
 
 export interface AnalyzeImageResult {
@@ -136,7 +139,8 @@ export class HttpAiGatewayImageGenerationClient implements AiGatewayImageGenerat
           size: input.size,
           n: input.count,
           response_format: "b64_json"
-        })
+        }),
+        signal: input.signal
       }
     );
 
@@ -188,30 +192,37 @@ export class HttpAiGatewayImageGenerationClient implements AiGatewayImageGenerat
     input: GenerateImageInput,
     aspectRatio: OpenRouterImageAspectRatio
   ): Promise<GenerateImageResult> {
-    return await this.sendOpenRouterImageRequest({
-      model: input.model,
-      prompt: buildImagePrompt(input),
-      resolution: "1K",
-      aspect_ratio: aspectRatio,
-      n: 1
-    });
+    return await this.sendOpenRouterImageRequest(
+      {
+        model: input.model,
+        prompt: buildImagePrompt(input),
+        resolution: "1K",
+        aspect_ratio: aspectRatio,
+        n: 1
+      },
+      input.signal
+    );
   }
 
   private async generateImageWithGenericOpenRouterApi(
     input: GenerateImageInput
   ): Promise<GenerateImageResult> {
     // 未声明比例协议能力的模型保留原有参数，避免错误套用 Gemini 图片模型约束。
-    return await this.sendOpenRouterImageRequest({
-      model: input.model,
-      prompt: buildImagePrompt(input),
-      size: input.size,
-      n: input.count,
-      response_format: "b64_json"
-    });
+    return await this.sendOpenRouterImageRequest(
+      {
+        model: input.model,
+        prompt: buildImagePrompt(input),
+        size: input.size,
+        n: input.count,
+        response_format: "b64_json"
+      },
+      input.signal
+    );
   }
 
   private async sendOpenRouterImageRequest(
-    body: Record<string, unknown>
+    body: Record<string, unknown>,
+    signal?: AbortSignal
   ): Promise<GenerateImageResult> {
     const response = await fetch(resolveGatewayUrl(this.config.aiGatewayBaseUrl, "images"), {
       method: "POST",
@@ -219,7 +230,8 @@ export class HttpAiGatewayImageGenerationClient implements AiGatewayImageGenerat
         "content-type": "application/json",
         authorization: `Bearer ${this.config.aiGatewayApiKey}`
       },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      signal
     });
 
     const payload = await response.json().catch(() => ({}));
@@ -313,7 +325,8 @@ export class HttpAiGatewayImageEditClient implements AiGatewayImageEditClient {
       headers: {
         authorization: `Bearer ${this.config.aiGatewayApiKey}`
       },
-      body: form
+      body: form,
+      signal: input.signal
     });
 
     const payload = await response.json().catch(() => ({}));
@@ -355,7 +368,8 @@ export class HttpAiGatewayImageEditClient implements AiGatewayImageEditClient {
               ]
             }
           ]
-        })
+        }),
+        signal: input.signal
       }
     );
 
@@ -410,7 +424,8 @@ export class HttpAiGatewayVisionTextClient implements AiGatewayVisionTextClient 
               ]
             }
           ]
-        })
+        }),
+        signal: input.signal
       }
     );
 

@@ -1,6 +1,8 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
+import type { ImageTaskCreationRepository } from "../../infrastructure/database/image-task-outbox-repository.js";
 import type {
+  CreateImageTaskRecordInput,
   ImageTaskRecord,
   ImageTasksRepository,
   ImageTaskStatus
@@ -48,6 +50,16 @@ export interface TransitionImageTaskRequest {
   billingEventId?: string;
   errorCode?: string;
   errorMessage?: string;
+  /** 仅供独立 Worker 使用，防止过期执行者结算或覆盖新执行者结果。 */
+  workerLockToken?: string;
+}
+
+export interface RecordWorkerOutputRequest {
+  ownerUserId: number;
+  taskId: string;
+  fileId: string;
+  gatewayRequestId: string;
+  workerLockToken?: string;
 }
 
 export interface ImageTaskResult {
@@ -177,7 +189,8 @@ export class ImageTaskService {
     private readonly auditLogger?: ImageTaskAuditLogger,
     private readonly modelResolver?: ImageTaskModelResolver,
     private readonly stylePresetResolver?: ImageTaskStylePresetResolver,
-    private readonly riskControlService?: Pick<RiskControlService, "assertAllowed">
+    private readonly riskControlService?: Pick<RiskControlService, "assertAllowed">,
+    private readonly taskCreationRepository?: ImageTaskCreationRepository
   ) {}
 
   async createTask(request: CreateImageTaskRequest): Promise<ImageTaskResult> {
@@ -362,7 +375,8 @@ export class ImageTaskService {
       });
     }
 
-    const taskId = `task_${randomUUID().replaceAll("-", "")}`;
+    // 任务 ID 由用户与创建幂等键稳定派生，并发重复请求会复用同一个 reserve 幂等键。
+    const taskId = createStableTaskId(request.ownerUserId, taskCreateIdempotencyKey);
     const reserveIdempotencyKey = `${taskId}:${taskType}:reserve`;
     const reservedBilling =
       this.billingService === undefined
@@ -382,7 +396,7 @@ export class ImageTaskService {
             expectedPoints: request.expectedPoints,
             idempotencyKey: reserveIdempotencyKey
           });
-    const task = await this.repository.create({
+    const taskInput: CreateImageTaskRecordInput = {
       id: taskId,
       source_task_id: sourceTaskId,
       source_file_id: sourceFileId,
@@ -404,6 +418,43 @@ export class ImageTaskService {
       cost_points: reservedBilling?.estimate.estimated_points ?? null,
       billing_event_id: reservedBilling?.billing_event.id ?? null,
       idempotency_key: taskCreateIdempotencyKey
+    };
+    let task: ImageTaskRecord;
+
+    try {
+      task = await (this.taskCreationRepository ?? this.repository).create(taskInput);
+    } catch (error: unknown) {
+      if (reservedBilling !== undefined && this.billingService !== undefined) {
+        // 预占已成功但任务与 Outbox 事务失败时，用稳定 release 幂等键补偿，避免形成孤立 hold。
+        await this.billingService.release({
+          ownerUserId: request.ownerUserId,
+          taskId,
+          reserveBillingEventId: reservedBilling.billing_event.id,
+          idempotencyKey: `${taskId}:${taskType}:release`,
+          reasonCode: "IMAGE_TASK_PERSISTENCE_FAILED",
+          reasonMessage: "图片任务保存失败，已释放预占积分。"
+        });
+      }
+
+      throw error;
+    }
+
+    // 并发唯一键冲突可能返回首次事务的任务，仍要核对参数，不能让相同幂等键代表不同请求。
+    assertIdempotentTaskMatches(task, {
+      taskType,
+      prompt,
+      negativePrompt,
+      stylePresetId,
+      inputFileIds,
+      gatewayModelCode,
+      gatewayCapability,
+      quality,
+      imageSize,
+      imageCount,
+      upscaleFactor,
+      sourceTaskId,
+      sourceFileId,
+      entitlementId
     });
 
     return {
@@ -566,6 +617,22 @@ export class ImageTaskService {
       throw new ImageTaskServiceError("IMAGE_TASK_FORBIDDEN", "不能修改他人的图片任务。", 403);
     }
 
+    if (request.workerLockToken !== undefined) {
+      const executionActive = await this.repository.isExecutionActive?.({
+        taskId: request.taskId,
+        lockToken: request.workerLockToken
+      });
+
+      if (executionActive !== true) {
+        // 先验证数据库租约再触发结算或释放，过期 Worker 不得改变计费与任务终态。
+        throw new ImageTaskServiceError(
+          "IMAGE_TASK_WORKER_LEASE_LOST",
+          "任务执行权已转移，当前 Worker 不能继续提交结果。",
+          409
+        );
+      }
+    }
+
     assertTransitionAllowed(currentTask.status, request.toStatus);
     assertFailureReason(request);
     const settleResult =
@@ -573,7 +640,7 @@ export class ImageTaskService {
         ? await this.settleReservedBilling(currentTask, request)
         : undefined;
     const releaseResult =
-      request.toStatus === "failed"
+      request.toStatus === "failed" || request.toStatus === "cancelled"
         ? await this.releaseReservedBilling(currentTask, request)
         : undefined;
     const persistedStatus = settleResult?.settled === false ? "billing_pending" : request.toStatus;
@@ -602,7 +669,8 @@ export class ImageTaskService {
           ? "图片已生成，积分结算等待对账。"
           : releaseResult?.released === false
             ? "任务失败，积分释放等待对账。"
-            : normalizeOptionalString(request.errorMessage)
+            : normalizeOptionalString(request.errorMessage),
+      workerLockToken: request.workerLockToken
     });
 
     if (updatedTask === undefined) {
@@ -617,6 +685,98 @@ export class ImageTaskService {
     return {
       task: toPublicImageTask(updatedTask)
     };
+  }
+
+  async recordWorkerOutput(request: RecordWorkerOutputRequest): Promise<ImageTaskResult> {
+    if (this.repository.recordOutputFile === undefined) {
+      if (request.workerLockToken !== undefined) {
+        throw new ImageTaskServiceError(
+          "IMAGE_TASK_WORKER_STORAGE_UNAVAILABLE",
+          "任务仓储不支持 Worker 结果登记。",
+          500
+        );
+      }
+
+      // 内存测试仓储和旧 inline 适配器仍由最终 succeeded 流转一次性写入 output_file_ids。
+      const currentTask = await this.repository.findById(request.taskId);
+
+      if (currentTask?.owner_user_id !== request.ownerUserId) {
+        throw new ImageTaskServiceError("IMAGE_TASK_NOT_FOUND", "图片任务不存在。", 404);
+      }
+
+      return { task: toPublicImageTask(currentTask) };
+    }
+
+    const updatedTask = await this.repository.recordOutputFile({
+      taskId: request.taskId,
+      ownerUserId: request.ownerUserId,
+      fileId: request.fileId,
+      gatewayRequestId: request.gatewayRequestId,
+      workerLockToken: request.workerLockToken
+    });
+
+    if (updatedTask === undefined) {
+      // 文件已进入对象存储后立即登记；若租约已失效则拒绝把它挂到其他执行者的任务上。
+      throw new ImageTaskServiceError(
+        "IMAGE_TASK_WORKER_LEASE_LOST",
+        "任务执行权已转移，结果文件登记失败。",
+        409
+      );
+    }
+
+    return { task: toPublicImageTask(updatedTask) };
+  }
+
+  async markTaskQueued(taskId: string): Promise<void> {
+    const task = await this.repository.findById(taskId);
+
+    if (task === undefined) {
+      throw new ImageTaskServiceError("IMAGE_TASK_NOT_FOUND", "图片任务不存在。", 404);
+    }
+
+    if (task.status === "queued" || task.status === "running" || task.status === "succeeded") {
+      // Dispatcher 重放时已推进的任务直接视为成功，不能反向修改状态。
+      return;
+    }
+
+    if (task.status !== "pending" && task.status !== "billing_reserved") {
+      throw new ImageTaskServiceError(
+        "IMAGE_TASK_QUEUE_STATUS_INVALID",
+        "当前任务状态不能进入队列。",
+        409
+      );
+    }
+
+    await this.transitionTask({
+      ownerUserId: task.owner_user_id,
+      taskId: task.id,
+      toStatus: "queued"
+    });
+  }
+
+  async cancelTaskForDispatchTimeout(taskId: string): Promise<void> {
+    const task = await this.repository.findById(taskId);
+
+    if (task === undefined || task.status === "cancelled" || task.status === "failed") {
+      return;
+    }
+
+    if (
+      task.status !== "pending" &&
+      task.status !== "billing_reserved" &&
+      task.status !== "queued"
+    ) {
+      // 已开始运行或进入终态的任务不再按 Outbox 超时取消，避免与 Worker 竞争结果。
+      return;
+    }
+
+    await this.transitionTask({
+      ownerUserId: task.owner_user_id,
+      taskId: task.id,
+      toStatus: "cancelled",
+      errorCode: "OUTBOX_DISPATCH_TIMEOUT",
+      errorMessage: "任务等待入队超时，已取消。"
+    });
   }
 
   private async releaseReservedBilling(
@@ -806,6 +966,15 @@ function assertIdempotentTaskMatches(
 
 function arraysEqual(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((item, index) => item === right[index]);
+}
+
+function createStableTaskId(ownerUserId: number, idempotencyKey: string): string {
+  const digest = createHash("sha256")
+    .update(`${String(ownerUserId)}:${idempotencyKey}`)
+    .digest("hex")
+    .slice(0, 32);
+
+  return `task_${digest}`;
 }
 
 function normalizeRequiredString(value: string, fieldName: string): string {

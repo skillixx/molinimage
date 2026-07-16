@@ -5,6 +5,7 @@ import test from "node:test";
 
 import { createAppRequestHandler } from "../src/app/create-app.js";
 import type { AppConfig } from "../src/config/app-config.js";
+import { InMemorySessionStore } from "../src/modules/auth/session-store.js";
 import type { ImageTaskStatus } from "../src/infrastructure/database/image-tasks-repository.js";
 import type {
   LaunchTicketVerifier,
@@ -15,6 +16,19 @@ const testConfig: AppConfig = {
   appBaseUrl: "http://127.0.0.1",
   databaseUrl: "mysql://user:password@127.0.0.1:3306/molinimage",
   redisUrl: "redis://127.0.0.1:6379/0",
+  redisKeyPrefix: "molinimage:test",
+  redisConnectTimeoutMs: 10000,
+  redisCommandTimeoutMs: 5000,
+  redisMaxRetriesPerRequest: 3,
+  imageTaskQueueName: "molinimage-image-tasks",
+  imageTaskWorkerConcurrency: 2,
+  imageTaskJobAttempts: 3,
+  imageTaskJobTimeoutMs: 120000,
+  imageTaskExecutionMode: "inline",
+  imageTaskOutboxPollIntervalMs: 1000,
+  imageTaskOutboxBatchSize: 20,
+  imageTaskOutboxMaxWaitMs: 300000,
+  imageTaskOutboxMaxBackoffMs: 60000,
   storageProvider: "minio",
   storageEndpoint: "http://127.0.0.1:9000",
   storageBucket: "molinimage",
@@ -38,6 +52,7 @@ const testConfig: AppConfig = {
   riskControlDisabledCapabilities: [],
   trustProxy: false,
   internalApiToken: "test_internal_token",
+  sessionStore: "memory",
   adminUserIds: [479],
   sessionCookieName: "molinimage_session",
   sessionCookieSecure: false,
@@ -128,6 +143,7 @@ async function startTestApp(reconciliationService: FakeBillingReconciliationServ
   const server = createServer(
     createAppRequestHandler(testConfig, {
       launchTicketVerifier: new FakeLaunchTicketVerifier(),
+      sessionStore: new InMemorySessionStore(),
       billingReconciliationService: reconciliationService
     })
   );

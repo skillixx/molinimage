@@ -19,6 +19,7 @@ import type {
   ImageTaskService,
   PublicImageTask
 } from "../modules/image-tasks/image-task-service.js";
+import { ImageTaskServiceError } from "../modules/image-tasks/image-task-service.js";
 import {
   buildImageEditPromptWithTemplate,
   buildImageRestorePromptWithTemplate,
@@ -43,10 +44,17 @@ export interface WorkerStylePresetResolver {
   ): Promise<{ prompt_template: string } | undefined>;
 }
 
+export interface ImageTaskWorkerExecutionContext {
+  workerLockToken: string;
+  signal: AbortSignal;
+  assertActive(): Promise<void>;
+}
+
 export class ImageGenerationWorkerService {
   constructor(
     private readonly taskRepository: ImageTasksRepository,
-    private readonly taskService: Pick<ImageTaskService, "transitionTask">,
+    private readonly taskService: Pick<ImageTaskService, "transitionTask"> &
+      Partial<Pick<ImageTaskService, "recordWorkerOutput">>,
     private readonly fileService: Pick<FileService, "uploadFile" | "readFileContentBase64">,
     private readonly aiGatewayClient: AiGatewayImageGenerationClient,
     private readonly aiGatewayLogsRepository: AiGatewayCallLogsRepository,
@@ -56,27 +64,32 @@ export class ImageGenerationWorkerService {
     private readonly imageOutputPostProcessor: ImageOutputPostProcessor = new NoopImageOutputPostProcessor()
   ) {}
 
-  async processTask(taskId: string): Promise<ProcessImageTaskResult> {
+  async processTask(
+    taskId: string,
+    executionContext?: ImageTaskWorkerExecutionContext
+  ): Promise<ProcessImageTaskResult> {
     const task = await this.taskRepository.findById(taskId);
 
     if (task === undefined) {
       throw new Error("图片任务不存在，worker 无法处理。");
     }
 
+    await this.prepareTaskForExecution(task, executionContext);
+
     if (task.task_type === "image_to_text") {
-      return await this.processImageToTextTask(task);
+      return await this.processImageToTextTask(task, executionContext);
     }
 
     if (task.task_type === "image_to_image") {
-      return await this.processImageToImageTask(task);
+      return await this.processImageToImageTask(task, executionContext);
     }
 
     if (task.task_type === "image_restore") {
-      return await this.processImageRestoreTask(task);
+      return await this.processImageRestoreTask(task, executionContext);
     }
 
     if (task.task_type === "upscale") {
-      return await this.processUpscaleTask(task);
+      return await this.processUpscaleTask(task, executionContext);
     }
 
     if (task.task_type !== "text_to_image") {
@@ -84,47 +97,57 @@ export class ImageGenerationWorkerService {
     }
 
     if (task.prompt === null || task.prompt.trim().length === 0) {
-      return await this.failTask(task, "PROMPT_REQUIRED", "文生图任务缺少提示词。");
+      return await this.failTask(
+        task,
+        "PROMPT_REQUIRED",
+        "文生图任务缺少提示词。",
+        executionContext
+      );
     }
 
-    await this.taskService.transitionTask({
-      ownerUserId: task.owner_user_id,
-      taskId: task.id,
-      toStatus: "queued"
-    });
-    await this.taskService.transitionTask({
-      ownerUserId: task.owner_user_id,
-      taskId: task.id,
-      toStatus: "running"
-    });
+    const recovered = await this.completeRecoveredImageTask(
+      task,
+      task.image_count,
+      executionContext
+    );
+
+    if (recovered !== undefined) {
+      return recovered;
+    }
 
     const startedAt = Date.now();
     let gatewayCompleted = false;
 
     try {
+      await executionContext?.assertActive();
       const prompt = await this.buildTextToImagePrompt(task);
       const generated = await this.aiGatewayClient.generateImage({
         prompt,
         negativePrompt: task.negative_prompt,
         model: task.gateway_model_code ?? "image_generation",
         size: task.image_size ?? "1024x1024",
-        count: task.image_count
+        count: task.image_count,
+        signal: executionContext?.signal
       });
       gatewayCompleted = true;
+      await executionContext?.assertActive();
       const outputFileIds: string[] = [];
 
       for (let index = 0; index < generated.images.length; index += 1) {
         const image = generated.images[index];
+        await executionContext?.assertActive();
         // 文生图已由模型按目标宽高比完成构图，直接保存原图，避免 cover 裁切丢失主体或文字。
         const uploaded = await this.fileService.uploadFile({
           ownerUserId: task.owner_user_id,
           fileName: `${task.id}_${String(index + 1)}.png`,
           mimeType: image.mime_type,
           contentBase64: image.content_base64,
-          fileType: "output"
+          fileType: "output",
+          idempotencyKey: `${task.id}:text_to_image:${String(index + 1)}`
         });
 
         outputFileIds.push(uploaded.file.id);
+        await this.recordOutputFile(task, uploaded.file.id, generated.request_id, executionContext);
       }
 
       await this.aiGatewayLogsRepository.create({
@@ -148,9 +171,11 @@ export class ImageGenerationWorkerService {
         taskId: task.id,
         toStatus: "succeeded",
         outputFileIds,
-        gatewayRequestId: generated.request_id
+        gatewayRequestId: generated.request_id,
+        workerLockToken: executionContext?.workerLockToken
       });
     } catch (error: unknown) {
+      throwIfExecutionInterrupted(error, executionContext);
       const message = error instanceof Error ? error.message : "AI 网关图片生成失败。";
       const errorCode = gatewayCompleted ? "FILE_STORAGE_FAILED" : "AI_GATEWAY_FAILED";
 
@@ -169,79 +194,110 @@ export class ImageGenerationWorkerService {
         error_code: errorCode,
         error_message: message
       });
-      return await this.failTask(task, errorCode, resolvePublicWorkerErrorMessage(errorCode));
+      return await this.failTask(
+        task,
+        errorCode,
+        resolvePublicWorkerErrorMessage(errorCode),
+        executionContext
+      );
     }
   }
 
-  private async processImageToImageTask(task: ImageTaskRecord): Promise<ProcessImageTaskResult> {
-    return await this.processImageEditTask(task, {
-      operation: "image_to_image",
-      resolveRequest: async () => ({
-        prompt: await this.buildImageEditPrompt(task),
-        size: task.image_size ?? "1024x1024",
-        count: task.image_count
-      }),
-      unavailableMessage: "图生图模型服务暂不可用。",
-      inputRequiredMessage: "图生图任务必须上传一张参考图。",
-      gatewayFailedMessage: "AI 网关图生图调用失败。",
-      outputFileLabel: "edit"
-    });
+  private async processImageToImageTask(
+    task: ImageTaskRecord,
+    executionContext?: ImageTaskWorkerExecutionContext
+  ): Promise<ProcessImageTaskResult> {
+    return await this.processImageEditTask(
+      task,
+      {
+        operation: "image_to_image",
+        resolveRequest: async () => ({
+          prompt: await this.buildImageEditPrompt(task),
+          size: task.image_size ?? "1024x1024",
+          count: task.image_count
+        }),
+        unavailableMessage: "图生图模型服务暂不可用。",
+        inputRequiredMessage: "图生图任务必须上传一张参考图。",
+        gatewayFailedMessage: "AI 网关图生图调用失败。",
+        outputFileLabel: "edit"
+      },
+      executionContext
+    );
   }
 
-  private async processImageRestoreTask(task: ImageTaskRecord): Promise<ProcessImageTaskResult> {
-    return await this.processImageEditTask(task, {
-      operation: "image_restore",
-      resolveRequest: async () => ({
-        prompt: await this.buildImageRestorePrompt(task),
-        size: task.image_size ?? "1024x1024",
-        count: task.image_count
-      }),
-      unavailableMessage: "图片修复模型服务暂不可用。",
-      inputRequiredMessage: "图片修复任务必须上传一张原图。",
-      gatewayFailedMessage: "AI 网关图片修复调用失败。",
-      outputFileLabel: "restore"
-    });
+  private async processImageRestoreTask(
+    task: ImageTaskRecord,
+    executionContext?: ImageTaskWorkerExecutionContext
+  ): Promise<ProcessImageTaskResult> {
+    return await this.processImageEditTask(
+      task,
+      {
+        operation: "image_restore",
+        resolveRequest: async () => ({
+          prompt: await this.buildImageRestorePrompt(task),
+          size: task.image_size ?? "1024x1024",
+          count: task.image_count
+        }),
+        unavailableMessage: "图片修复模型服务暂不可用。",
+        inputRequiredMessage: "图片修复任务必须上传一张原图。",
+        gatewayFailedMessage: "AI 网关图片修复调用失败。",
+        outputFileLabel: "restore"
+      },
+      executionContext
+    );
   }
 
-  private async processUpscaleTask(task: ImageTaskRecord): Promise<ProcessImageTaskResult> {
+  private async processUpscaleTask(
+    task: ImageTaskRecord,
+    executionContext?: ImageTaskWorkerExecutionContext
+  ): Promise<ProcessImageTaskResult> {
     const factor = task.upscale_factor;
 
     if (factor !== 2 && factor !== 4) {
-      return await this.failTask(task, "UPSCALE_FACTOR_INVALID", "高清放大倍率只支持 2x 或 4x。");
+      return await this.failTask(
+        task,
+        "UPSCALE_FACTOR_INVALID",
+        "高清放大倍率只支持 2x 或 4x。",
+        executionContext
+      );
     }
 
-    return await this.processImageEditTask(task, {
-      operation: "upscale",
-      resolveRequest: (inputFile) => {
-        const inputWidth = inputFile.file.width;
-        const inputHeight = inputFile.file.height;
+    return await this.processImageEditTask(
+      task,
+      {
+        operation: "upscale",
+        resolveRequest: (inputFile) => {
+          const inputWidth = inputFile.file.width;
+          const inputHeight = inputFile.file.height;
 
-        if (inputWidth === null || inputHeight === null) {
-          throw new FileServiceError(
-            "INPUT_IMAGE_DIMENSIONS_MISSING",
-            "无法识别原图宽高，不能执行高清放大。",
-            400
-          );
-        }
+          if (inputWidth === null || inputHeight === null) {
+            throw new FileServiceError(
+              "INPUT_IMAGE_DIMENSIONS_MISSING",
+              "无法识别原图宽高，不能执行高清放大。",
+              400
+            );
+          }
 
-        const targetWidth = resolveUpscaleTargetDimension(inputWidth, factor);
-        const targetHeight = resolveUpscaleTargetDimension(inputHeight, factor);
-        const strictDimensions = task.gateway_capability === "upscale";
+          const targetWidth = resolveUpscaleTargetDimension(inputWidth, factor);
+          const targetHeight = resolveUpscaleTargetDimension(inputHeight, factor);
+          const strictDimensions = task.gateway_capability === "upscale";
 
-        return {
-          prompt: buildUpscalePrompt(factor, targetWidth, targetHeight),
-          size: `${String(targetWidth)}x${String(targetHeight)}`,
-          count: 1,
-          // 专用 upscale 模型必须按目标尺寸验收；OpenRouter/Gemini 这类 image_edit 通用模型会返回平台允许尺寸，先保存实际尺寸。
-          expectedWidth: strictDimensions ? targetWidth : undefined,
-          expectedHeight: strictDimensions ? targetHeight : undefined
-        };
+          return {
+            prompt: buildUpscalePrompt(factor, targetWidth, targetHeight),
+            size: `${String(targetWidth)}x${String(targetHeight)}`,
+            count: 1,
+            // 专用 upscale 模型必须按目标尺寸验收；OpenRouter/Gemini 这类 image_edit 通用模型会返回平台允许尺寸，先保存实际尺寸。
+            expectedWidth: strictDimensions ? targetWidth : undefined,
+            expectedHeight: strictDimensions ? targetHeight : undefined
+          };
+        },
+        unavailableMessage: "高清放大模型服务暂不可用。",
+        inputRequiredMessage: "高清放大任务必须上传一张原图。",
+        gatewayFailedMessage: "AI 网关高清放大调用失败。",
+        outputFileLabel: `upscale_${String(factor)}x`
       },
-      unavailableMessage: "高清放大模型服务暂不可用。",
-      inputRequiredMessage: "高清放大任务必须上传一张原图。",
-      gatewayFailedMessage: "AI 网关高清放大调用失败。",
-      outputFileLabel: `upscale_${String(factor)}x`
-    });
+      executionContext
+    );
   }
 
   private async processImageEditTask(
@@ -267,31 +323,43 @@ export class ImageGenerationWorkerService {
       inputRequiredMessage: string;
       gatewayFailedMessage: string;
       outputFileLabel: string;
-    }
+    },
+    executionContext?: ImageTaskWorkerExecutionContext
   ): Promise<ProcessImageTaskResult> {
     if (this.imageEditClient === undefined) {
-      return await this.failTask(task, "IMAGE_EDIT_CLIENT_UNAVAILABLE", options.unavailableMessage);
+      return await this.failTask(
+        task,
+        "IMAGE_EDIT_CLIENT_UNAVAILABLE",
+        options.unavailableMessage,
+        executionContext
+      );
     }
 
     if (task.input_file_ids.length !== 1) {
-      return await this.failTask(task, "INPUT_IMAGE_REQUIRED", options.inputRequiredMessage);
+      return await this.failTask(
+        task,
+        "INPUT_IMAGE_REQUIRED",
+        options.inputRequiredMessage,
+        executionContext
+      );
     }
 
-    await this.taskService.transitionTask({
-      ownerUserId: task.owner_user_id,
-      taskId: task.id,
-      toStatus: "queued"
-    });
-    await this.taskService.transitionTask({
-      ownerUserId: task.owner_user_id,
-      taskId: task.id,
-      toStatus: "running"
-    });
+    const expectedOutputCount = options.operation === "upscale" ? 1 : task.image_count;
+    const recovered = await this.completeRecoveredImageTask(
+      task,
+      expectedOutputCount,
+      executionContext
+    );
+
+    if (recovered !== undefined) {
+      return recovered;
+    }
 
     const startedAt = Date.now();
     let gatewayCompleted = false;
 
     try {
+      await executionContext?.assertActive();
       // worker 处理前再次按 owner_user_id 读取输入图，防止队列重放或伪造任务引用他人文件。
       const inputFile = await this.fileService.readFileContentBase64(
         task.owner_user_id,
@@ -304,13 +372,16 @@ export class ImageGenerationWorkerService {
         prompt: editRequest.prompt,
         model: task.gateway_model_code ?? "image_edit",
         size: editRequest.size,
-        count: editRequest.count
+        count: editRequest.count,
+        signal: executionContext?.signal
       });
       gatewayCompleted = true;
+      await executionContext?.assertActive();
       const outputFileIds: string[] = [];
 
       for (let index = 0; index < edited.images.length; index += 1) {
         const image = edited.images[index];
+        await executionContext?.assertActive();
         const normalizedImage = await this.normalizeOutputImage(image, editRequest.size);
         const uploaded = await this.fileService.uploadFile({
           ownerUserId: task.owner_user_id,
@@ -320,10 +391,12 @@ export class ImageGenerationWorkerService {
           fileType: "output",
           generatedAsset: options.operation === "upscale",
           expectedWidth: editRequest.expectedWidth,
-          expectedHeight: editRequest.expectedHeight
+          expectedHeight: editRequest.expectedHeight,
+          idempotencyKey: `${task.id}:${options.operation}:${String(index + 1)}`
         });
 
         outputFileIds.push(uploaded.file.id);
+        await this.recordOutputFile(task, uploaded.file.id, edited.request_id, executionContext);
       }
 
       await this.aiGatewayLogsRepository.create({
@@ -347,9 +420,11 @@ export class ImageGenerationWorkerService {
         taskId: task.id,
         toStatus: "succeeded",
         outputFileIds,
-        gatewayRequestId: edited.request_id
+        gatewayRequestId: edited.request_id,
+        workerLockToken: executionContext?.workerLockToken
       });
     } catch (error: unknown) {
+      throwIfExecutionInterrupted(error, executionContext);
       const message = error instanceof Error ? error.message : options.gatewayFailedMessage;
       const errorCode =
         error instanceof FileServiceError
@@ -378,38 +453,42 @@ export class ImageGenerationWorkerService {
         // 审计日志属于旁路能力，写入失败不能阻断任务失败流转和预占积分释放。
       }
 
-      return await this.failTask(task, errorCode, resolvePublicWorkerErrorMessage(errorCode));
+      return await this.failTask(
+        task,
+        errorCode,
+        resolvePublicWorkerErrorMessage(errorCode),
+        executionContext
+      );
     }
   }
 
-  private async processImageToTextTask(task: ImageTaskRecord): Promise<ProcessImageTaskResult> {
+  private async processImageToTextTask(
+    task: ImageTaskRecord,
+    executionContext?: ImageTaskWorkerExecutionContext
+  ): Promise<ProcessImageTaskResult> {
     if (this.visionTextClient === undefined) {
       return await this.failTask(
         task,
         "VISION_TEXT_CLIENT_UNAVAILABLE",
-        "图生文模型服务暂不可用。"
+        "图生文模型服务暂不可用。",
+        executionContext
       );
     }
 
     if (task.input_file_ids.length !== 1) {
-      return await this.failTask(task, "INPUT_IMAGE_REQUIRED", "图生文任务必须上传一张输入图片。");
+      return await this.failTask(
+        task,
+        "INPUT_IMAGE_REQUIRED",
+        "图生文任务必须上传一张输入图片。",
+        executionContext
+      );
     }
-
-    await this.taskService.transitionTask({
-      ownerUserId: task.owner_user_id,
-      taskId: task.id,
-      toStatus: "queued"
-    });
-    await this.taskService.transitionTask({
-      ownerUserId: task.owner_user_id,
-      taskId: task.id,
-      toStatus: "running"
-    });
 
     const startedAt = Date.now();
     const prompt = buildVisionTextPrompt(task.prompt);
 
     try {
+      await executionContext?.assertActive();
       // 读取输入图时再次按 owner_user_id 校验，防止队列重放或伪造 task 数据越权使用他人图片。
       const inputFile = await this.fileService.readFileContentBase64(
         task.owner_user_id,
@@ -419,8 +498,10 @@ export class ImageGenerationWorkerService {
         imageBase64: inputFile.content_base64,
         imageMimeType: inputFile.file.mime_type,
         prompt,
-        model: task.gateway_model_code ?? "vision_text"
+        model: task.gateway_model_code ?? "vision_text",
+        signal: executionContext?.signal
       });
+      await executionContext?.assertActive();
 
       await this.aiGatewayLogsRepository.create({
         id: `ailog_${randomUUID().replaceAll("-", "")}`,
@@ -443,9 +524,11 @@ export class ImageGenerationWorkerService {
         taskId: task.id,
         toStatus: "succeeded",
         textResult: analyzed.text,
-        gatewayRequestId: analyzed.request_id
+        gatewayRequestId: analyzed.request_id,
+        workerLockToken: executionContext?.workerLockToken
       });
     } catch (error: unknown) {
+      throwIfExecutionInterrupted(error, executionContext);
       const message = error instanceof Error ? error.message : "AI 网关图生文调用失败。";
 
       await this.aiGatewayLogsRepository.create({
@@ -466,7 +549,8 @@ export class ImageGenerationWorkerService {
       return await this.failTask(
         task,
         "AI_GATEWAY_FAILED",
-        resolvePublicWorkerErrorMessage("AI_GATEWAY_FAILED")
+        resolvePublicWorkerErrorMessage("AI_GATEWAY_FAILED"),
+        executionContext
       );
     }
   }
@@ -474,15 +558,96 @@ export class ImageGenerationWorkerService {
   private async failTask(
     task: { id: string; owner_user_id: number },
     code: string,
-    message: string
+    message: string,
+    executionContext?: ImageTaskWorkerExecutionContext
   ): Promise<ProcessImageTaskResult> {
+    await executionContext?.assertActive();
     // 失败流转由 ImageTaskService 统一释放预占积分，worker 不直接操作计费模块。
     return await this.taskService.transitionTask({
       ownerUserId: task.owner_user_id,
       taskId: task.id,
       toStatus: "failed",
       errorCode: code,
-      errorMessage: message
+      errorMessage: message,
+      workerLockToken: executionContext?.workerLockToken
+    });
+  }
+
+  private async prepareTaskForExecution(
+    task: ImageTaskRecord,
+    executionContext?: ImageTaskWorkerExecutionContext
+  ): Promise<void> {
+    if (executionContext !== undefined) {
+      if (task.status !== "running") {
+        throw new Error("独立 Worker 只能处理已原子抢占的 running 任务。");
+      }
+
+      await executionContext.assertActive();
+      return;
+    }
+
+    // inline 模式暂时保留既有同步行为；队列模式必须在调用本服务前由数据库原子抢占。
+    if (task.status === "billing_reserved") {
+      await this.taskService.transitionTask({
+        ownerUserId: task.owner_user_id,
+        taskId: task.id,
+        toStatus: "queued"
+      });
+      await this.taskService.transitionTask({
+        ownerUserId: task.owner_user_id,
+        taskId: task.id,
+        toStatus: "running"
+      });
+      return;
+    }
+
+    if (task.status === "queued") {
+      await this.taskService.transitionTask({
+        ownerUserId: task.owner_user_id,
+        taskId: task.id,
+        toStatus: "running"
+      });
+      return;
+    }
+
+    if (task.status !== "running") {
+      throw new Error(`图片任务状态 ${task.status} 不能开始执行。`);
+    }
+  }
+
+  private async recordOutputFile(
+    task: ImageTaskRecord,
+    fileId: string,
+    gatewayRequestId: string,
+    executionContext?: ImageTaskWorkerExecutionContext
+  ): Promise<void> {
+    await this.taskService.recordWorkerOutput?.({
+      ownerUserId: task.owner_user_id,
+      taskId: task.id,
+      fileId,
+      gatewayRequestId,
+      workerLockToken: executionContext?.workerLockToken
+    });
+  }
+
+  private async completeRecoveredImageTask(
+    task: ImageTaskRecord,
+    expectedOutputCount: number,
+    executionContext?: ImageTaskWorkerExecutionContext
+  ): Promise<ProcessImageTaskResult | undefined> {
+    if (task.output_file_ids.length < expectedOutputCount || task.gateway_request_id === null) {
+      return undefined;
+    }
+
+    // 上次进程若已保存并登记全部文件，恢复消费只补终态与结算，不再次调用模型。
+    await executionContext?.assertActive();
+    return await this.taskService.transitionTask({
+      ownerUserId: task.owner_user_id,
+      taskId: task.id,
+      toStatus: "succeeded",
+      outputFileIds: task.output_file_ids.slice(0, expectedOutputCount),
+      gatewayRequestId: task.gateway_request_id,
+      workerLockToken: executionContext?.workerLockToken
     });
   }
 
@@ -548,4 +713,19 @@ function summarizeText(value: string): string {
   const normalized = value.replace(/\s+/gu, " ").trim();
 
   return normalized.length > 120 ? `${normalized.slice(0, 120)}...` : normalized;
+}
+
+function throwIfExecutionInterrupted(
+  error: unknown,
+  executionContext?: ImageTaskWorkerExecutionContext
+): void {
+  if (executionContext?.signal.aborted === true) {
+    const reason = executionContext.signal.reason as unknown;
+    throw reason instanceof Error ? reason : new Error("图片任务执行已中止。");
+  }
+
+  if (error instanceof ImageTaskServiceError && error.code === "IMAGE_TASK_WORKER_LEASE_LOST") {
+    // 租约丢失属于可恢复的 Worker 基础设施异常，交回 BullMQ 重试，不能误标为永久业务失败。
+    throw error;
+  }
 }

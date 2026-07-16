@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { createAppRequestHandler } from "../src/app/create-app.js";
 import type { AppConfig } from "../src/config/app-config.js";
+import { InMemorySessionStore } from "../src/modules/auth/session-store.js";
 import type {
   LaunchTicketVerifier,
   MolingLaunchIdentity
@@ -17,6 +18,19 @@ const testConfig: AppConfig = {
   appBaseUrl: "http://127.0.0.1",
   databaseUrl: "mysql://user:password@127.0.0.1:3306/molinimage",
   redisUrl: "redis://127.0.0.1:6379/0",
+  redisKeyPrefix: "molinimage:test",
+  redisConnectTimeoutMs: 10000,
+  redisCommandTimeoutMs: 5000,
+  redisMaxRetriesPerRequest: 3,
+  imageTaskQueueName: "molinimage-image-tasks",
+  imageTaskWorkerConcurrency: 2,
+  imageTaskJobAttempts: 3,
+  imageTaskJobTimeoutMs: 120000,
+  imageTaskExecutionMode: "inline",
+  imageTaskOutboxPollIntervalMs: 1000,
+  imageTaskOutboxBatchSize: 20,
+  imageTaskOutboxMaxWaitMs: 300000,
+  imageTaskOutboxMaxBackoffMs: 60000,
   storageProvider: "minio",
   storageEndpoint: "http://127.0.0.1:9000",
   storageBucket: "molinimage",
@@ -40,6 +54,7 @@ const testConfig: AppConfig = {
   riskControlDisabledCapabilities: [],
   trustProxy: false,
   internalApiToken: "test_internal_token",
+  sessionStore: "memory",
   sessionCookieName: "molinimage_session",
   sessionCookieSecure: false,
   sessionTtlSeconds: 86400,
@@ -111,6 +126,27 @@ void test("前端 API 封装只访问应用后端接口", async () => {
   assert.doesNotMatch(frontendSource, /openrouter\.ai/i);
   assert.doesNotMatch(frontendSource, /minio/i);
   assert.doesNotMatch(frontendSource, /\/api\/internal/i);
+});
+
+void test("工作台五种图片能力统一使用异步轮询、幂等提交和刷新恢复", async () => {
+  const apiClient = await readFile(resolve("public", "assets", "api-client.js"), "utf8");
+  const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
+  const poller = await readFile(resolve("public", "assets", "image-task-poller.js"), "utf8");
+
+  assert.match(apiClient, /"idempotency-key"/);
+  // 五种首次提交路径加一条刷新重放路径，全部复用同一提交函数。
+  assert.equal(workbench.match(/await createQueuedImageTask\(/g)?.length, 6);
+  assert.match(workbench, /molinimage:active-image-task:v1/);
+  assert.match(workbench, /molinimage:pending-image-submission:v1/);
+  assert.match(workbench, /window\.sessionStorage\.setItem/);
+  assert.match(workbench, /restoreActiveImageTask\(\)/);
+  assert.match(workbench, /window\.addEventListener\("pagehide"/);
+  assert.match(workbench, /window\.addEventListener\("online"/);
+  assert.match(workbench, /retryImageTask[\s\S]*acceptAsyncImageTask/);
+  assert.match(poller, /nextDelayMs \* 2/);
+  assert.match(poller, /onTransientError/);
+  assert.match(poller, /onTerminalError/);
+  assert.match(poller, /isTerminalImageTaskStatus/);
 });
 
 void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风格模板体验", async () => {
@@ -479,6 +515,7 @@ async function startTestApp(): Promise<{
   const server = createServer(
     createAppRequestHandler(testConfig, {
       launchTicketVerifier: new FakeLaunchTicketVerifier(),
+      sessionStore: new InMemorySessionStore(),
       imageModelService: new FakeImageModelService()
     })
   );

@@ -10,12 +10,32 @@ import type {
   MolingLaunchIdentity
 } from "../src/infrastructure/moling/moling-client.js";
 import { MolingTicketError } from "../src/infrastructure/moling/moling-client.js";
-import { InMemorySessionStore } from "../src/modules/auth/session-store.js";
+import {
+  InMemorySessionStore,
+  SessionStoreError,
+  type ApplicationSession,
+  type CreatedSession,
+  type SessionIdentity,
+  type SessionStore
+} from "../src/modules/auth/session-store.js";
 
 const testConfig: AppConfig = {
   appBaseUrl: "http://127.0.0.1",
   databaseUrl: "mysql://user:password@127.0.0.1:3306/molinimage",
   redisUrl: "redis://127.0.0.1:6379/0",
+  redisKeyPrefix: "molinimage:test",
+  redisConnectTimeoutMs: 10000,
+  redisCommandTimeoutMs: 5000,
+  redisMaxRetriesPerRequest: 3,
+  imageTaskQueueName: "molinimage-image-tasks",
+  imageTaskWorkerConcurrency: 2,
+  imageTaskJobAttempts: 3,
+  imageTaskJobTimeoutMs: 120000,
+  imageTaskExecutionMode: "inline",
+  imageTaskOutboxPollIntervalMs: 1000,
+  imageTaskOutboxBatchSize: 20,
+  imageTaskOutboxMaxWaitMs: 300000,
+  imageTaskOutboxMaxBackoffMs: 60000,
   storageProvider: "minio",
   storageEndpoint: "http://127.0.0.1:9000",
   storageBucket: "molinimage",
@@ -39,6 +59,7 @@ const testConfig: AppConfig = {
   riskControlDisabledCapabilities: [],
   trustProxy: false,
   internalApiToken: "test_internal_token",
+  sessionStore: "memory",
   sessionCookieName: "molinimage_session",
   sessionCookieSecure: false,
   sessionTtlSeconds: 86400,
@@ -108,7 +129,11 @@ void test("缺少 ticket 的入口返回明确错误", async () => {
 });
 
 void test("无效 ticket 被拒绝，且不能创建 session", async () => {
-  const app = await startTestApp(new FakeLaunchTicketVerifier("valid_ticket", validIdentity));
+  const sessionStore = new RecordingSessionStore();
+  const app = await startTestApp(
+    new FakeLaunchTicketVerifier("valid_ticket", validIdentity),
+    sessionStore
+  );
 
   try {
     const response = await fetch(`${app.baseUrl}/enter?ticket=bad_ticket`, {
@@ -119,6 +144,7 @@ void test("无效 ticket 被拒绝，且不能创建 session", async () => {
     assert.equal(response.status, 401);
     assert.equal(body.error?.code, "LAUNCH_TICKET_INVALID");
     assert.equal(response.headers.get("set-cookie"), null);
+    assert.equal(sessionStore.createCount, 0);
   } finally {
     await app.close();
   }
@@ -199,6 +225,70 @@ void test("登出后当前 session 失效", async () => {
   }
 });
 
+void test("创建 Redis Session 失败时返回稳定的 503 错误", async () => {
+  const app = await startTestApp(
+    new FakeLaunchTicketVerifier("valid_ticket", validIdentity),
+    new CreateFailingSessionStore()
+  );
+
+  try {
+    const response = await fetch(`${app.baseUrl}/enter?ticket=valid_ticket`, {
+      redirect: "manual"
+    });
+    const body = await readErrorBody(response);
+
+    assert.equal(response.status, 503);
+    assert.equal(body.error?.code, "SESSION_STORE_UNAVAILABLE");
+    assert.equal(body.error.message, "会话服务暂不可用，请稍后重试。");
+    assert.equal(body.error.request_id, response.headers.get("x-request-id"));
+    assert.doesNotMatch(JSON.stringify(body), /redis:\/\/|valid_ticket|secret/iu);
+  } finally {
+    await app.close();
+  }
+});
+
+void test("读取 Redis Session 失败时不降级为未登录", async () => {
+  const app = await startTestApp(
+    new FakeLaunchTicketVerifier("unused", validIdentity),
+    new ReadFailingSessionStore()
+  );
+
+  try {
+    const response = await fetch(`${app.baseUrl}/api/me`, {
+      headers: { cookie: "molinimage_session=sensitive_session_token" }
+    });
+    const body = await readErrorBody(response);
+
+    assert.equal(response.status, 503);
+    assert.equal(body.error?.code, "SESSION_STORE_UNAVAILABLE");
+    assert.doesNotMatch(JSON.stringify(body), /sensitive_session_token|redis:\/\//iu);
+  } finally {
+    await app.close();
+  }
+});
+
+void test("删除 Redis Session 失败时清除 Cookie 并返回稳定错误", async () => {
+  const app = await startTestApp(
+    new FakeLaunchTicketVerifier("unused", validIdentity),
+    new DeleteFailingSessionStore()
+  );
+
+  try {
+    const response = await fetch(`${app.baseUrl}/api/auth/logout`, {
+      method: "POST",
+      headers: { cookie: "molinimage_session=sensitive_session_token" }
+    });
+    const body = await readErrorBody(response);
+
+    assert.equal(response.status, 503);
+    assert.equal(body.error?.code, "SESSION_STORE_UNAVAILABLE");
+    assert.match(response.headers.get("set-cookie") ?? "", /Max-Age=0/);
+    assert.doesNotMatch(JSON.stringify(body), /sensitive_session_token|redis:\/\//iu);
+  } finally {
+    await app.close();
+  }
+});
+
 const validIdentity: MolingLaunchIdentity = {
   user_id: 479,
   app_id: 990008,
@@ -225,14 +315,62 @@ class FakeLaunchTicketVerifier implements LaunchTicketVerifier {
   }
 }
 
-async function startTestApp(launchTicketVerifier: LaunchTicketVerifier): Promise<{
+class RecordingSessionStore implements SessionStore {
+  readonly delegate = new InMemorySessionStore();
+  createCount = 0;
+
+  createSession(identity: SessionIdentity, ttlSeconds: number): Promise<CreatedSession> {
+    this.createCount += 1;
+    return this.delegate.createSession(identity, ttlSeconds);
+  }
+
+  getSession(token: string | undefined): Promise<ApplicationSession | undefined> {
+    return this.delegate.getSession(token);
+  }
+
+  deleteSession(token: string | undefined): Promise<void> {
+    return this.delegate.deleteSession(token);
+  }
+}
+
+class CreateFailingSessionStore extends InMemorySessionStore {
+  override createSession(): Promise<CreatedSession> {
+    return Promise.reject(new SessionStoreError({ cause: new Error("redis://secret") }));
+  }
+}
+
+class ReadFailingSessionStore extends InMemorySessionStore {
+  override getSession(): Promise<ApplicationSession | undefined> {
+    return Promise.reject(new SessionStoreError({ cause: new Error("redis://secret") }));
+  }
+}
+
+class DeleteFailingSessionStore extends InMemorySessionStore {
+  override getSession(): Promise<ApplicationSession> {
+    return Promise.resolve({
+      ...validIdentity,
+      session_id: "existing_session",
+      created_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 60_000).toISOString()
+    });
+  }
+
+  override deleteSession(): Promise<void> {
+    return Promise.reject(new SessionStoreError({ cause: new Error("redis://secret") }));
+  }
+}
+
+async function startTestApp(
+  launchTicketVerifier: LaunchTicketVerifier,
+  sessionStore: SessionStore = new InMemorySessionStore()
+): Promise<{
   baseUrl: string;
   close: () => Promise<void>;
 }> {
   const server = createServer(
     createAppRequestHandler(testConfig, {
       launchTicketVerifier,
-      sessionStore: new InMemorySessionStore()
+      sessionStore
     })
   );
 
@@ -278,4 +416,12 @@ function readCookieHeader(setCookieHeader: string | null): string {
   }
 
   return setCookieHeader.split(";")[0] ?? "";
+}
+
+async function readErrorBody(response: Response): Promise<{
+  error?: { code?: string; message?: string; request_id?: string };
+}> {
+  return (await response.json()) as {
+    error?: { code?: string; message?: string; request_id?: string };
+  };
 }

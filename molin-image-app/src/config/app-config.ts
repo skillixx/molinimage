@@ -2,6 +2,19 @@ export interface AppConfig {
   appBaseUrl: string;
   databaseUrl: string;
   redisUrl: string;
+  redisKeyPrefix: string;
+  redisConnectTimeoutMs: number;
+  redisCommandTimeoutMs: number;
+  redisMaxRetriesPerRequest: number;
+  imageTaskQueueName: string;
+  imageTaskWorkerConcurrency: number;
+  imageTaskJobAttempts: number;
+  imageTaskJobTimeoutMs: number;
+  imageTaskExecutionMode: "inline" | "queue";
+  imageTaskOutboxPollIntervalMs: number;
+  imageTaskOutboxBatchSize: number;
+  imageTaskOutboxMaxWaitMs: number;
+  imageTaskOutboxMaxBackoffMs: number;
   storageProvider: string;
   storageEndpoint: string;
   storageBucket: string;
@@ -26,6 +39,7 @@ export interface AppConfig {
   trustProxy: boolean;
   internalApiToken: string;
   adminUserIds?: number[];
+  sessionStore: "memory" | "redis";
   sessionCookieName: string;
   sessionCookieSecure: boolean;
   sessionTtlSeconds: number;
@@ -60,6 +74,20 @@ type RequiredEnvKey = (typeof requiredEnvKeys)[number];
 type OptionalEnvKey =
   | "APP_ENV"
   | "PORT"
+  | "REDIS_KEY_PREFIX"
+  | "REDIS_CONNECT_TIMEOUT_MS"
+  | "REDIS_COMMAND_TIMEOUT_MS"
+  | "REDIS_MAX_RETRIES_PER_REQUEST"
+  | "IMAGE_TASK_QUEUE_NAME"
+  | "IMAGE_TASK_WORKER_CONCURRENCY"
+  | "IMAGE_TASK_JOB_ATTEMPTS"
+  | "IMAGE_TASK_JOB_TIMEOUT_MS"
+  | "IMAGE_TASK_EXECUTION_MODE"
+  | "IMAGE_TASK_OUTBOX_POLL_INTERVAL_MS"
+  | "IMAGE_TASK_OUTBOX_BATCH_SIZE"
+  | "IMAGE_TASK_OUTBOX_MAX_WAIT_MS"
+  | "IMAGE_TASK_OUTBOX_MAX_BACKOFF_MS"
+  | "SESSION_STORE"
   | "SESSION_COOKIE_NAME"
   | "SESSION_COOKIE_SECURE"
   | "SESSION_TTL_SECONDS"
@@ -88,10 +116,60 @@ export function loadAppConfig(env: AppEnv = process.env): AppConfig {
     throw new ConfigError(missingKeys);
   }
 
+  const appEnv = readAppEnvironment(env.APP_ENV);
+
   return {
     appBaseUrl: readRequiredEnv(env, "APP_BASE_URL"),
     databaseUrl: readRequiredEnv(env, "DATABASE_URL"),
     redisUrl: readRequiredEnv(env, "REDIS_URL"),
+    // 环境名进入实际 Key 前缀，防止开发、测试和生产误用同一 Redis 时互相覆盖数据。
+    redisKeyPrefix: `${readRedisIdentifier(env.REDIS_KEY_PREFIX, "molinimage", "REDIS_KEY_PREFIX")}:${appEnv}`,
+    redisConnectTimeoutMs: readPositiveInteger(
+      env.REDIS_CONNECT_TIMEOUT_MS?.trim() ?? "10000",
+      "REDIS_CONNECT_TIMEOUT_MS"
+    ),
+    redisCommandTimeoutMs: readPositiveInteger(
+      env.REDIS_COMMAND_TIMEOUT_MS?.trim() ?? "5000",
+      "REDIS_COMMAND_TIMEOUT_MS"
+    ),
+    redisMaxRetriesPerRequest: readNonNegativeInteger(
+      env.REDIS_MAX_RETRIES_PER_REQUEST?.trim() ?? "3",
+      "REDIS_MAX_RETRIES_PER_REQUEST"
+    ),
+    imageTaskQueueName: readRedisIdentifier(
+      env.IMAGE_TASK_QUEUE_NAME,
+      "molinimage-image-tasks",
+      "IMAGE_TASK_QUEUE_NAME"
+    ),
+    imageTaskWorkerConcurrency: readPositiveInteger(
+      env.IMAGE_TASK_WORKER_CONCURRENCY?.trim() ?? "2",
+      "IMAGE_TASK_WORKER_CONCURRENCY"
+    ),
+    imageTaskJobAttempts: readPositiveInteger(
+      env.IMAGE_TASK_JOB_ATTEMPTS?.trim() ?? "3",
+      "IMAGE_TASK_JOB_ATTEMPTS"
+    ),
+    imageTaskJobTimeoutMs: readPositiveInteger(
+      env.IMAGE_TASK_JOB_TIMEOUT_MS?.trim() ?? "120000",
+      "IMAGE_TASK_JOB_TIMEOUT_MS"
+    ),
+    imageTaskExecutionMode: readImageTaskExecutionMode(env.IMAGE_TASK_EXECUTION_MODE, appEnv),
+    imageTaskOutboxPollIntervalMs: readPositiveInteger(
+      env.IMAGE_TASK_OUTBOX_POLL_INTERVAL_MS?.trim() ?? "1000",
+      "IMAGE_TASK_OUTBOX_POLL_INTERVAL_MS"
+    ),
+    imageTaskOutboxBatchSize: readPositiveInteger(
+      env.IMAGE_TASK_OUTBOX_BATCH_SIZE?.trim() ?? "20",
+      "IMAGE_TASK_OUTBOX_BATCH_SIZE"
+    ),
+    imageTaskOutboxMaxWaitMs: readPositiveInteger(
+      env.IMAGE_TASK_OUTBOX_MAX_WAIT_MS?.trim() ?? "300000",
+      "IMAGE_TASK_OUTBOX_MAX_WAIT_MS"
+    ),
+    imageTaskOutboxMaxBackoffMs: readPositiveInteger(
+      env.IMAGE_TASK_OUTBOX_MAX_BACKOFF_MS?.trim() ?? "60000",
+      "IMAGE_TASK_OUTBOX_MAX_BACKOFF_MS"
+    ),
     storageProvider: readRequiredEnv(env, "STORAGE_PROVIDER"),
     storageEndpoint: readRequiredEnv(env, "STORAGE_ENDPOINT"),
     storageBucket: readRequiredEnv(env, "STORAGE_BUCKET"),
@@ -141,6 +219,7 @@ export function loadAppConfig(env: AppEnv = process.env): AppConfig {
     trustProxy: readBoolean(env.TRUST_PROXY, false),
     internalApiToken: readRequiredEnv(env, "INTERNAL_API_TOKEN"),
     adminUserIds: readPositiveIntegerList(env.MOLINIMAGE_ADMIN_USER_IDS),
+    sessionStore: readSessionStore(env.SESSION_STORE, appEnv),
     sessionCookieName: readOptionalText(env.SESSION_COOKIE_NAME, "molinimage_session"),
     sessionCookieSecure: readSessionCookieSecure(env),
     sessionTtlSeconds: readPositiveInteger(
@@ -241,6 +320,54 @@ function readSessionCookieSecure(env: AppEnv): boolean {
   return env.APP_ENV?.trim() === "production";
 }
 
+function readSessionStore(
+  value: string | undefined,
+  appEnv: "development" | "test" | "production"
+): "memory" | "redis" {
+  const configuredStore = value?.trim().toLowerCase();
+  const sessionStore =
+    configuredStore === undefined || configuredStore.length === 0
+      ? appEnv === "production"
+        ? "redis"
+        : "memory"
+      : configuredStore;
+
+  if (sessionStore !== "memory" && sessionStore !== "redis") {
+    throw new Error("SESSION_STORE 只能填写 memory 或 redis");
+  }
+
+  if (appEnv === "production" && sessionStore !== "redis") {
+    // 生产环境禁止内存会话，避免重启或多实例部署导致用户随机掉线。
+    throw new Error("生产环境 SESSION_STORE 必须配置为 redis");
+  }
+
+  return sessionStore;
+}
+
+function readImageTaskExecutionMode(
+  value: string | undefined,
+  appEnv: "development" | "test" | "production"
+): "inline" | "queue" {
+  const configuredMode = value?.trim().toLowerCase();
+  const executionMode =
+    configuredMode === undefined || configuredMode.length === 0
+      ? appEnv === "production"
+        ? "queue"
+        : "inline"
+      : configuredMode;
+
+  if (executionMode !== "inline" && executionMode !== "queue") {
+    throw new Error("IMAGE_TASK_EXECUTION_MODE 只能填写 inline 或 queue");
+  }
+
+  if (appEnv === "production" && executionMode !== "queue") {
+    // 生产环境禁止在 API 进程内执行模型，避免请求超时和多实例任务行为不一致。
+    throw new Error("生产环境 IMAGE_TASK_EXECUTION_MODE 必须配置为 queue");
+  }
+
+  return executionMode;
+}
+
 function readBoolean(envValue: string | undefined, defaultValue: boolean): boolean {
   const normalized = envValue?.trim().toLowerCase();
 
@@ -257,6 +384,27 @@ function readBoolean(envValue: string | undefined, defaultValue: boolean): boole
   }
 
   throw new Error("布尔配置只能填写 true 或 false");
+}
+
+function readAppEnvironment(value: string | undefined): "development" | "test" | "production" {
+  const appEnv = readOptionalText(value, "development");
+
+  if (appEnv === "development" || appEnv === "test" || appEnv === "production") {
+    return appEnv;
+  }
+
+  throw new Error("APP_ENV 只能填写 development、test 或 production");
+}
+
+function readRedisIdentifier(value: string | undefined, defaultValue: string, key: string): string {
+  const identifier = readOptionalText(value, defaultValue);
+
+  if (!/^[a-zA-Z0-9_-]+$/.test(identifier)) {
+    // Redis 命名只允许稳定的 ASCII 标识，避免空格和分隔符破坏统一 Key 与队列命名。
+    throw new Error(`${key} 只能包含字母、数字、下划线和连字符`);
+  }
+
+  return identifier;
 }
 
 function isBlank(value: string | undefined): boolean {

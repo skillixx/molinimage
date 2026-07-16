@@ -40,15 +40,17 @@ import {
 import { createHealthResponse } from "../modules/health/health.service.js";
 import type { ImageGenerationWorkerService } from "../workers/image-generation-worker-service.js";
 import {
-  InMemorySessionStore,
   readCookie,
+  SessionStoreError,
   serializeExpiredSessionCookie,
-  serializeSessionCookie
+  serializeSessionCookie,
+  type ApplicationSession,
+  type SessionStore
 } from "../modules/auth/session-store.js";
 
 export interface AppDependencies {
   launchTicketVerifier: LaunchTicketVerifier;
-  sessionStore?: InMemorySessionStore;
+  sessionStore: SessionStore;
   fileService?: Pick<
     FileService,
     | "uploadFile"
@@ -87,10 +89,8 @@ export interface AppDependencies {
 }
 
 export function createAppRequestHandler(config: AppConfig, dependencies: AppDependencies) {
-  const sessionStore = dependencies.sessionStore ?? new InMemorySessionStore();
-
   return (request: IncomingMessage, response: ServerResponse): void => {
-    void handleRequest(request, response, config, dependencies, sessionStore);
+    void handleRequest(request, response, config, dependencies, dependencies.sessionStore);
   };
 }
 
@@ -99,14 +99,26 @@ async function handleRequest(
   response: ServerResponse,
   config: AppConfig,
   dependencies: AppDependencies,
-  sessionStore: InMemorySessionStore
+  sessionStore: SessionStore
 ): Promise<void> {
   const requestId = randomUUID();
   const url = new URL(request.url ?? "/", config.appBaseUrl);
   const sessionToken = readCookie(request, config.sessionCookieName);
-  const session = sessionStore.getSession(sessionToken);
-
   response.setHeader("X-Request-Id", requestId);
+  let session: ApplicationSession | undefined;
+
+  try {
+    // 鉴权只依赖异步 SessionStore 契约；Redis 故障必须中止请求，禁止静默降级为未登录。
+    session = await sessionStore.getSession(sessionToken);
+  } catch (error: unknown) {
+    if (error instanceof SessionStoreError) {
+      writeSessionStoreUnavailable(response, requestId);
+      return;
+    }
+
+    writeSessionStoreUnavailable(response, requestId);
+    return;
+  }
 
   if (request.method === "GET" && url.pathname === "/admin/pricing") {
     if (session === undefined) {
@@ -1007,11 +1019,19 @@ async function handleRequest(
   }
 
   if (request.method === "POST" && url.pathname === "/api/auth/logout") {
-    sessionStore.deleteSession(sessionToken);
     response.setHeader(
       "Set-Cookie",
       serializeExpiredSessionCookie(config.sessionCookieName, config.sessionCookieSecure)
     );
+
+    try {
+      await sessionStore.deleteSession(sessionToken);
+    } catch {
+      // 即使 Redis 删除失败也立即清除浏览器 Cookie，同时明确告知服务暂不可用。
+      writeSessionStoreUnavailable(response, requestId);
+      return;
+    }
+
     writeJson(response, 200, { ok: true });
     return;
   }
@@ -1069,6 +1089,13 @@ async function handleCreateImageTask(
       requestIp: getClientIp(request, config.trustProxy),
       entitlementId
     });
+
+    if (config.imageTaskExecutionMode === "queue") {
+      // queue 模式只提交 MySQL 任务与 Outbox，禁止在 API 请求内直接调用模型。
+      // 任务提交成功后直接返回事务结果，预览服务故障不能把已入队任务伪装成创建失败。
+      writeJson(response, 202, result);
+      return;
+    }
 
     if (taskType === "text_to_image" && imageGenerationWorkerService !== undefined) {
       // P2 阶段先使用进程内 worker 处理单个任务；后续接 Redis 后复用同一个 processTask。
@@ -1307,6 +1334,15 @@ async function handleRetryImageTask(
       entitlementId,
       { requestId, requestIp: getClientIp(request, config.trustProxy) }
     );
+
+    if (config.imageTaskExecutionMode === "queue") {
+      // 重试同样只创建新任务与 Outbox，模型执行由后续独立 Worker 负责。
+      writeJson(response, 202, {
+        ...retryResult,
+        retried_from_task_id: retryResult.retried_from_task_id
+      });
+      return;
+    }
 
     if (imageGenerationWorkerService !== undefined) {
       // P2 阶段沿用进程内 worker；后续接 Redis 后这里只需要返回新 task 并由队列异步处理。
@@ -1843,7 +1879,7 @@ async function handleLaunch(
   requestId: string,
   config: AppConfig,
   launchTicketVerifier: LaunchTicketVerifier,
-  sessionStore: InMemorySessionStore
+  sessionStore: SessionStore
 ): Promise<void> {
   const ticket = url.searchParams.get("ticket")?.trim();
 
@@ -1867,7 +1903,7 @@ async function handleLaunch(
       return;
     }
 
-    const createdSession = sessionStore.createSession(identity, config.sessionTtlSeconds);
+    const createdSession = await sessionStore.createSession(identity, config.sessionTtlSeconds);
 
     response.statusCode = 302;
     response.setHeader("Location", "/");
@@ -1882,6 +1918,11 @@ async function handleLaunch(
     );
     response.end();
   } catch (error: unknown) {
+    if (error instanceof SessionStoreError) {
+      writeSessionStoreUnavailable(response, requestId);
+      return;
+    }
+
     if (error instanceof MolingTicketError) {
       const statusCode = error.code === "LAUNCH_TICKET_INVALID" ? 401 : 502;
       writeError(response, statusCode, requestId, error.code, error.message);
@@ -1968,6 +2009,17 @@ function writeError(
       request_id: requestId
     }
   });
+}
+
+function writeSessionStoreUnavailable(response: ServerResponse, requestId: string): void {
+  // 对外只返回稳定错误码和中文提示，不透出 Redis URL、驱动错误或 Session Token。
+  writeError(
+    response,
+    503,
+    requestId,
+    "SESSION_STORE_UNAVAILABLE",
+    "会话服务暂不可用，请稍后重试。"
+  );
 }
 
 function writePublicError(response: ServerResponse, requestId: string, error: unknown): void {

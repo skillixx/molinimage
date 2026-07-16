@@ -19,6 +19,8 @@ export interface UploadFileRequest {
   expectedWidth?: number;
   expectedHeight?: number;
   generatedAsset?: boolean;
+  /** Worker 结果使用稳定键，重试时复用同一文件记录和对象路径。 */
+  idempotencyKey?: string;
 }
 
 export interface UploadFileResult {
@@ -135,7 +137,10 @@ export class FileService {
       );
     }
 
-    const fileId = `file_${randomUUID().replaceAll("-", "")}`;
+    const fileId =
+      request.idempotencyKey === undefined
+        ? `file_${randomUUID().replaceAll("-", "")}`
+        : buildIdempotentFileId(request.ownerUserId, request.idempotencyKey);
     const storageKey = buildStorageKey({
       ownerUserId: request.ownerUserId,
       fileId,
@@ -143,28 +148,50 @@ export class FileService {
       mimeType,
       fileType: request.fileType ?? "input"
     });
+    const checksum = createHash("sha256").update(body).digest("hex");
+    const existingFile = await this.repository.findById(fileId);
+
+    if (existingFile !== undefined) {
+      // Worker 崩溃重试时先核对既有文件，匹配则直接复用，避免再次覆盖 MinIO 或产生孤立记录。
+      assertIdempotentFileMatches(existingFile, request.ownerUserId, mimeType, checksum);
+      return { file: toPublicFileRecord(existingFile) };
+    }
+
     const storedObject = await this.storageService.uploadObject({
       key: storageKey,
       body,
       contentType: mimeType
     });
-    const checksum = createHash("sha256").update(body).digest("hex");
-    const file = await this.repository.create({
-      id: fileId,
-      owner_user_id: request.ownerUserId,
-      file_type: request.fileType ?? "input",
-      original_name: fileName,
-      mime_type: mimeType,
-      // 数据库只保存 provider、bucket、key，不保存 endpoint 拼接出的完整 URL。
-      storage_provider: storedObject.provider,
-      storage_bucket: storedObject.bucket,
-      storage_key: storedObject.key,
-      size_bytes: body.byteLength,
-      // 宽高来自实际图片二进制，不信任浏览器或 AI 网关声明的目标尺寸。
-      width: dimensions?.width ?? null,
-      height: dimensions?.height ?? null,
-      checksum
-    });
+    let file: FileRecord;
+
+    try {
+      file = await this.repository.create({
+        id: fileId,
+        owner_user_id: request.ownerUserId,
+        file_type: request.fileType ?? "input",
+        original_name: fileName,
+        mime_type: mimeType,
+        // 数据库只保存 provider、bucket、key，不保存 endpoint 拼接出的完整 URL。
+        storage_provider: storedObject.provider,
+        storage_bucket: storedObject.bucket,
+        storage_key: storedObject.key,
+        size_bytes: body.byteLength,
+        // 宽高来自实际图片二进制，不信任浏览器或 AI 网关声明的目标尺寸。
+        width: dimensions?.width ?? null,
+        height: dimensions?.height ?? null,
+        checksum
+      });
+    } catch (error: unknown) {
+      const concurrentFile = await this.repository.findById(fileId);
+
+      if (concurrentFile === undefined || request.idempotencyKey === undefined) {
+        throw error;
+      }
+
+      // 极小概率的并发插入由唯一文件 ID 吸收，但必须核对内容，不能把不同结果误认为同一文件。
+      assertIdempotentFileMatches(concurrentFile, request.ownerUserId, mimeType, checksum);
+      file = concurrentFile;
+    }
 
     return {
       file: toPublicFileRecord(file)
@@ -261,6 +288,40 @@ export class FileService {
     }
 
     return files;
+  }
+}
+
+function buildIdempotentFileId(ownerUserId: number, idempotencyKey: string): string {
+  const normalizedKey = idempotencyKey.trim();
+
+  if (normalizedKey.length === 0) {
+    throw new FileServiceError("FILE_IDEMPOTENCY_KEY_INVALID", "文件幂等键不能为空。", 400);
+  }
+
+  const digest = createHash("sha256")
+    .update(`${String(ownerUserId)}:${normalizedKey}`)
+    .digest("hex")
+    .slice(0, 32);
+
+  return `file_${digest}`;
+}
+
+function assertIdempotentFileMatches(
+  file: FileRecord,
+  ownerUserId: number,
+  mimeType: string,
+  checksum: string
+): void {
+  if (
+    file.owner_user_id !== ownerUserId ||
+    file.mime_type !== mimeType ||
+    file.checksum !== checksum
+  ) {
+    throw new FileServiceError(
+      "FILE_IDEMPOTENCY_CONFLICT",
+      "同一任务输出位置已存在不同文件，请检查任务恢复状态。",
+      409
+    );
   }
 }
 

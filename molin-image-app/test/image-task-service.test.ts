@@ -16,6 +16,7 @@ import type {
   ImageTasksRepository,
   TransitionImageTaskInput
 } from "../src/infrastructure/database/image-tasks-repository.js";
+import type { ImageTaskCreationRepository } from "../src/infrastructure/database/image-task-outbox-repository.js";
 import {
   type CreateImageTaskRequest,
   type ImageTaskAuditEvent,
@@ -904,6 +905,126 @@ void test("作品历史删除使用软删除并从列表隐藏", async () => {
   );
 });
 
+void test("queue 模式使用事务创建器写入任务与 Outbox", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const taskCreator = new RecordingTaskCreationRepository(repository);
+  const service = new ImageTaskService(
+    repository,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    taskCreator
+  );
+
+  const created = await service.createTask({
+    ownerUserId: 479,
+    taskType: "text_to_image",
+    idempotencyKey: "queue-create-001"
+  });
+
+  assert.equal(taskCreator.inputs.length, 1);
+  assert.equal(taskCreator.inputs[0]?.id, created.task.id);
+  assert.equal(taskCreator.inputs[0]?.idempotency_key, "queue-create-001");
+});
+
+void test("并发重复创建使用稳定 task_id 和预占幂等键", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new FakeBillingService();
+  const service = new ImageTaskService(repository, billingService);
+  const request: CreateImageTaskRequest = {
+    ownerUserId: 479,
+    taskType: "text_to_image",
+    entitlementId: 62,
+    idempotencyKey: "concurrent-create-001"
+  };
+
+  const [first, second] = await Promise.all([
+    service.createTask(request),
+    service.createTask(request)
+  ]);
+
+  assert.equal(first.task.id, second.task.id);
+  assert.equal(
+    billingService.reserveRequests[0]?.idempotencyKey,
+    billingService.reserveRequests[1]?.idempotencyKey
+  );
+  assert.equal(
+    billingService.reserveRequests[0]?.taskId,
+    billingService.reserveRequests[1]?.taskId
+  );
+});
+
+void test("Outbox 超时取消会沿用稳定 release 幂等键释放预占", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new FakeBillingService();
+  const service = new ImageTaskService(repository, billingService);
+  const created = await service.createTask({
+    ownerUserId: 479,
+    taskType: "text_to_image",
+    entitlementId: 62,
+    idempotencyKey: "timeout-create-001"
+  });
+
+  await service.cancelTaskForDispatchTimeout(created.task.id);
+  await service.cancelTaskForDispatchTimeout(created.task.id);
+
+  assert.equal((await service.getTask(479, created.task.id)).task.status, "cancelled");
+  assert.equal(billingService.releaseRequests.length, 1);
+  assert.equal(
+    billingService.releaseRequests[0]?.idempotencyKey,
+    `${created.task.id}:text_to_image:release`
+  );
+});
+
+void test("Job 已写入但 Outbox 回写超时时 queued 任务仍可安全取消", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new FakeBillingService();
+  const service = new ImageTaskService(repository, billingService);
+  const created = await service.createTask({
+    ownerUserId: 479,
+    taskType: "text_to_image",
+    entitlementId: 62,
+    idempotencyKey: "queued-timeout-001"
+  });
+  await service.markTaskQueued(created.task.id);
+
+  await service.cancelTaskForDispatchTimeout(created.task.id);
+
+  assert.equal((await service.getTask(479, created.task.id)).task.status, "cancelled");
+  assert.equal(billingService.releaseRequests.length, 1);
+});
+
+void test("任务与 Outbox 事务失败后释放已预占积分", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new FakeBillingService();
+  const service = new ImageTaskService(
+    repository,
+    billingService,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    new FailingTaskCreationRepository()
+  );
+
+  await assert.rejects(
+    service.createTask({
+      ownerUserId: 479,
+      taskType: "text_to_image",
+      entitlementId: 62,
+      idempotencyKey: "outbox-failure-001"
+    }),
+    /模拟任务事务失败/
+  );
+
+  assert.equal(billingService.reserveRequests.length, 1);
+  assert.equal(billingService.releaseRequests.length, 1);
+  assert.equal(billingService.releaseRequests[0]?.reserveBillingEventId, "billing_event_001");
+  assert.equal(billingService.releaseRequests[0]?.reasonCode, "IMAGE_TASK_PERSISTENCE_FAILED");
+});
+
 class BlockingRiskControlService {
   readonly requests: {
     requestId?: string;
@@ -1065,6 +1186,23 @@ class InMemoryImageTasksRepository implements ImageTasksRepository {
     this.records.set(updated.id, updated);
 
     return Promise.resolve(updated);
+  }
+}
+
+class RecordingTaskCreationRepository implements ImageTaskCreationRepository {
+  readonly inputs: CreateImageTaskRecordInput[] = [];
+
+  constructor(private readonly repository: InMemoryImageTasksRepository) {}
+
+  create(input: CreateImageTaskRecordInput): Promise<ImageTaskRecord> {
+    this.inputs.push(input);
+    return this.repository.create(input);
+  }
+}
+
+class FailingTaskCreationRepository implements ImageTaskCreationRepository {
+  create(): Promise<ImageTaskRecord> {
+    return Promise.reject(new Error("模拟任务事务失败"));
   }
 }
 

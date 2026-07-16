@@ -1,4 +1,4 @@
-import type { Pool, ResultSetHeader, RowDataPacket } from "mysql2/promise";
+import type { Pool, PoolConnection, ResultSetHeader, RowDataPacket } from "mysql2/promise";
 
 export type ImageTaskStatus =
   | "pending"
@@ -76,6 +76,26 @@ export interface TransitionImageTaskInput {
   billingEventId?: string | null;
   errorCode?: string | null;
   errorMessage?: string | null;
+  workerLockToken?: string;
+}
+
+export interface ClaimImageTaskExecutionInput {
+  taskId: string;
+  lockToken: string;
+  lockDurationMs: number;
+}
+
+export interface ImageTaskExecutionClaim {
+  task: ImageTaskRecord;
+  lock_token: string;
+}
+
+export interface RecordImageTaskOutputInput {
+  taskId: string;
+  ownerUserId: number;
+  fileId: string;
+  gatewayRequestId: string;
+  workerLockToken?: string;
 }
 
 export interface ImageTasksRepository {
@@ -98,6 +118,13 @@ export interface ImageTasksRepository {
     taskId: string;
   }): Promise<ImageTaskRecord | undefined>;
   updateStatus(input: TransitionImageTaskInput): Promise<ImageTaskRecord | undefined>;
+  claimExecution?(
+    input: ClaimImageTaskExecutionInput
+  ): Promise<ImageTaskExecutionClaim | undefined>;
+  renewExecution?(input: ClaimImageTaskExecutionInput): Promise<boolean>;
+  releaseExecution?(input: { taskId: string; lockToken: string }): Promise<boolean>;
+  isExecutionActive?(input: { taskId: string; lockToken: string }): Promise<boolean>;
+  recordOutputFile?(input: RecordImageTaskOutputInput): Promise<ImageTaskRecord | undefined>;
 }
 
 interface ImageTaskRow extends RowDataPacket {
@@ -137,54 +164,7 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
 
   async create(input: CreateImageTaskRecordInput): Promise<ImageTaskRecord> {
     try {
-      await this.pool.execute<ResultSetHeader>(
-        `INSERT INTO image_tasks (
-        id,
-        source_task_id,
-        source_file_id,
-        owner_user_id,
-        entitlement_id,
-        task_type,
-        status,
-        prompt,
-        negative_prompt,
-        style_preset_id,
-        input_file_ids,
-        output_file_ids,
-        gateway_model_code,
-        gateway_capability,
-        quality,
-        image_size,
-        image_count,
-        upscale_factor,
-        cost_points,
-        billing_event_id,
-        idempotency_key
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          input.id,
-          input.source_task_id ?? null,
-          input.source_file_id ?? null,
-          input.owner_user_id,
-          input.entitlement_id ?? null,
-          input.task_type,
-          input.status,
-          input.prompt,
-          input.negative_prompt,
-          input.style_preset_id,
-          JSON.stringify(input.input_file_ids),
-          JSON.stringify([]),
-          input.gateway_model_code,
-          input.gateway_capability,
-          input.quality,
-          input.image_size,
-          input.image_count,
-          input.upscale_factor ?? null,
-          input.cost_points,
-          input.billing_event_id,
-          input.idempotency_key
-        ]
-      );
+      await insertImageTaskRecord(this.pool, input);
     } catch (error: unknown) {
       const existingTask = await this.findByIdempotencyKey(input.idempotency_key);
 
@@ -366,6 +346,11 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
   }
 
   async updateStatus(input: TransitionImageTaskInput): Promise<ImageTaskRecord | undefined> {
+    const workerFenceSql = input.workerLockToken === undefined ? "" : "AND worker_lock_token = ?";
+    const clearWorkerLeaseSql =
+      input.workerLockToken === undefined
+        ? ""
+        : ", worker_lock_token = NULL, worker_lock_expires_at = NULL";
     const [result] = await this.pool.execute<ResultSetHeader>(
       `UPDATE image_tasks
        SET
@@ -376,9 +361,11 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
         billing_event_id = COALESCE(?, billing_event_id),
         error_code = ?,
         error_message = ?
+        ${clearWorkerLeaseSql}
        WHERE id = ?
         AND owner_user_id = ?
-        AND status = ?`,
+        AND status = ?
+        ${workerFenceSql}`,
       [
         input.toStatus,
         input.outputFileIds === undefined ? null : JSON.stringify(input.outputFileIds),
@@ -389,7 +376,8 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
         input.errorMessage ?? null,
         input.taskId,
         input.ownerUserId,
-        input.fromStatus
+        input.fromStatus,
+        ...(input.workerLockToken === undefined ? [] : [input.workerLockToken])
       ]
     );
 
@@ -400,6 +388,181 @@ export class MySqlImageTasksRepository implements ImageTasksRepository {
 
     return this.findById(input.taskId);
   }
+
+  async claimExecution(
+    input: ClaimImageTaskExecutionInput
+  ): Promise<ImageTaskExecutionClaim | undefined> {
+    const lockDurationMicroseconds = toDurationMicroseconds(
+      input.lockDurationMs,
+      "Worker 租约时长"
+    );
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET status = 'running',
+           worker_lock_token = ?,
+           worker_lock_expires_at = TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(3)),
+           worker_started_at = COALESCE(worker_started_at, CURRENT_TIMESTAMP(3)),
+           worker_attempt_count = worker_attempt_count + 1
+       WHERE id = ?
+         AND deleted_at IS NULL
+         AND (
+           status IN ('billing_reserved', 'queued')
+           OR (
+             status = 'running'
+             AND (worker_lock_expires_at IS NULL OR worker_lock_expires_at <= CURRENT_TIMESTAMP(3))
+           )
+         )`,
+      [input.lockToken, lockDurationMicroseconds, input.taskId]
+    );
+
+    if (result.affectedRows !== 1) {
+      // 终态任务、有效租约或不存在的任务都不再执行，重复 Job 在这里被幂等吸收。
+      return undefined;
+    }
+
+    const task = await this.findById(input.taskId);
+
+    if (task === undefined) {
+      throw new Error("Worker 抢占图片任务后回读失败");
+    }
+
+    return { task, lock_token: input.lockToken };
+  }
+
+  async renewExecution(input: ClaimImageTaskExecutionInput): Promise<boolean> {
+    const lockDurationMicroseconds = toDurationMicroseconds(
+      input.lockDurationMs,
+      "Worker 租约时长"
+    );
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET worker_lock_expires_at = TIMESTAMPADD(MICROSECOND, ?, CURRENT_TIMESTAMP(3))
+       WHERE id = ?
+         AND status = 'running'
+         AND worker_lock_token = ?
+         AND worker_lock_expires_at > CURRENT_TIMESTAMP(3)`,
+      [lockDurationMicroseconds, input.taskId, input.lockToken]
+    );
+
+    return result.affectedRows === 1;
+  }
+
+  async releaseExecution(input: { taskId: string; lockToken: string }): Promise<boolean> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET status = 'queued',
+           worker_lock_token = NULL,
+           worker_lock_expires_at = NULL
+       WHERE id = ?
+         AND status = 'running'
+         AND worker_lock_token = ?`,
+      [input.taskId, input.lockToken]
+    );
+
+    return result.affectedRows === 1;
+  }
+
+  async isExecutionActive(input: { taskId: string; lockToken: string }): Promise<boolean> {
+    const [rows] = await this.pool.execute<(RowDataPacket & { active: number })[]>(
+      `SELECT EXISTS(
+         SELECT 1
+         FROM image_tasks
+         WHERE id = ?
+           AND status = 'running'
+           AND worker_lock_token = ?
+           AND worker_lock_expires_at > CURRENT_TIMESTAMP(3)
+       ) AS active`,
+      [input.taskId, input.lockToken]
+    );
+
+    return rows[0]?.active === 1;
+  }
+
+  async recordOutputFile(input: RecordImageTaskOutputInput): Promise<ImageTaskRecord | undefined> {
+    const workerFenceSql = input.workerLockToken === undefined ? "" : "AND worker_lock_token = ?";
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE image_tasks
+       SET output_file_ids = CASE
+             WHEN JSON_CONTAINS(output_file_ids, JSON_QUOTE(?), '$') THEN output_file_ids
+             ELSE JSON_ARRAY_APPEND(output_file_ids, '$', ?)
+           END,
+           gateway_request_id = COALESCE(gateway_request_id, ?)
+       WHERE id = ?
+         AND owner_user_id = ?
+         AND status = 'running'
+         ${workerFenceSql}`,
+      [
+        input.fileId,
+        input.fileId,
+        input.gatewayRequestId,
+        input.taskId,
+        input.ownerUserId,
+        ...(input.workerLockToken === undefined ? [] : [input.workerLockToken])
+      ]
+    );
+
+    if (result.affectedRows !== 1) {
+      // 只有持有当前执行租约的 Worker 才能登记结果，过期 Worker 不能覆盖新执行者状态。
+      return undefined;
+    }
+
+    return await this.findById(input.taskId);
+  }
+}
+
+export async function insertImageTaskRecord(
+  executor: Pool | PoolConnection,
+  input: CreateImageTaskRecordInput
+): Promise<void> {
+  // 该底层 INSERT 可复用于普通创建和 Outbox 事务，但不负责提交事务或吞掉唯一键冲突。
+  await executor.execute<ResultSetHeader>(
+    `INSERT INTO image_tasks (
+      id,
+      source_task_id,
+      source_file_id,
+      owner_user_id,
+      entitlement_id,
+      task_type,
+      status,
+      prompt,
+      negative_prompt,
+      style_preset_id,
+      input_file_ids,
+      output_file_ids,
+      gateway_model_code,
+      gateway_capability,
+      quality,
+      image_size,
+      image_count,
+      upscale_factor,
+      cost_points,
+      billing_event_id,
+      idempotency_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.id,
+      input.source_task_id ?? null,
+      input.source_file_id ?? null,
+      input.owner_user_id,
+      input.entitlement_id ?? null,
+      input.task_type,
+      input.status,
+      input.prompt,
+      input.negative_prompt,
+      input.style_preset_id,
+      JSON.stringify(input.input_file_ids),
+      JSON.stringify([]),
+      input.gateway_model_code,
+      input.gateway_capability,
+      input.quality,
+      input.image_size,
+      input.image_count,
+      input.upscale_factor ?? null,
+      input.cost_points,
+      input.billing_event_id,
+      input.idempotency_key
+    ]
+  );
 }
 
 function toImageTaskRecord(row: ImageTaskRow): ImageTaskRecord {
@@ -436,6 +599,18 @@ function formatSqlLimit(value: number): string {
 
   // MySQL 某些版本对 prepared statement 的 LIMIT/OFFSET 参数兼容性不好；这里仅内联已校验数字。
   return String(value);
+}
+
+function toDurationMicroseconds(value: number, label: string): number {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > Math.floor(Number.MAX_SAFE_INTEGER / 1000)
+  ) {
+    throw new Error(`${label}必须是可转换为微秒的正整数。`);
+  }
+
+  return value * 1000;
 }
 
 const imageTaskSelectSql = `SELECT

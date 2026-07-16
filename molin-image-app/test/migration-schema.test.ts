@@ -18,7 +18,8 @@ const requiredTables = [
   "image_model_defaults",
   "billing_reconciliation_attempts",
   "risk_control_events",
-  "risk_control_counters"
+  "risk_control_counters",
+  "image_task_outbox"
 ];
 const requiredIndexes = [
   "uk_image_tasks_idempotency_key",
@@ -45,7 +46,10 @@ const requiredIndexes = [
   "idx_risk_control_ip_created",
   "idx_risk_control_decision_created",
   "idx_risk_control_reason_created",
-  "idx_risk_control_counters_updated"
+  "idx_risk_control_counters_updated",
+  "uk_image_task_outbox_task_id",
+  "idx_image_task_outbox_dispatch",
+  "idx_image_task_outbox_timeout"
 ];
 
 void test("基础表 migration 包含 P1-G02 要求的表、引擎、字符集和关键索引", async () => {
@@ -373,6 +377,44 @@ void test("风控计数器 migration 支持窗口内原子限流", async () => {
   assert.match(upSql, /PRIMARY KEY \(subject_type, subject_key, bucket_start\)/i);
   assert.match(upSql, /request_count INT UNSIGNED/i);
   assert.match(downSql, /DROP TABLE IF EXISTS risk_control_counters/i);
+});
+
+void test("任务 Outbox migration 支持事务投递、退避扫描和任务级去重", async () => {
+  const upSql = await readFile(
+    resolve("migrations", "017_create_image_task_outbox.up.sql"),
+    "utf8"
+  );
+  const downSql = await readFile(
+    resolve("migrations", "017_create_image_task_outbox.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /CREATE TABLE IF NOT EXISTS image_task_outbox/i);
+  assert.match(upSql, /status VARCHAR\(32\)/i);
+  assert.match(upSql, /attempt_count INT UNSIGNED/i);
+  assert.match(upSql, /next_attempt_at DATETIME\(3\)/i);
+  assert.match(upSql, /UNIQUE KEY uk_image_task_outbox_task_id \(task_id\)/i);
+  assert.match(upSql, /idx_image_task_outbox_dispatch/i);
+  assert.match(upSql, /idx_image_task_outbox_timeout/i);
+  assert.match(downSql, /DROP TABLE IF EXISTS image_task_outbox/i);
+});
+
+void test("独立 Worker migration 支持数据库租约、锁恢复和执行次数", async () => {
+  const upSql = await readFile(
+    resolve("migrations", "018_add_image_task_worker_lease.up.sql"),
+    "utf8"
+  );
+  const downSql = await readFile(
+    resolve("migrations", "018_add_image_task_worker_lease.down.sql"),
+    "utf8"
+  );
+
+  assert.match(upSql, /worker_lock_token VARCHAR\(64\)/i);
+  assert.match(upSql, /worker_lock_expires_at DATETIME\(3\)/i);
+  assert.match(upSql, /worker_started_at DATETIME\(3\)/i);
+  assert.match(upSql, /worker_attempt_count INT UNSIGNED/i);
+  assert.match(upSql, /idx_image_tasks_worker_recovery/i);
+  assert.match(downSql, /DROP COLUMN worker_lock_token/i);
 });
 
 async function readAllUpMigrations(): Promise<string> {

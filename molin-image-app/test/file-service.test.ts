@@ -78,6 +78,31 @@ void test("高清放大结果可超过用户上传 10MB 限制但仍受生成资
   assert.equal(generated.file.height, 4096);
 });
 
+void test("Worker 使用稳定文件幂等键时重试不会重复写入 MinIO 或文件记录", async () => {
+  const repository = new InMemoryFilesRepository();
+  const storage = new FakeStorageService();
+  const service = new FileService(repository, storage, {
+    storageProvider: "minio",
+    storageBucket: "molinimage",
+    storagePresignedUrlTtlSeconds: 300
+  });
+  const request = {
+    ownerUserId: 479,
+    fileName: "task-result.png",
+    mimeType: "image/png",
+    contentBase64: createPngHeader(1024, 1024).toString("base64"),
+    fileType: "output",
+    idempotencyKey: "task_001:text_to_image:1"
+  };
+
+  const first = await service.uploadFile(request);
+  const retried = await service.uploadFile(request);
+
+  assert.equal(retried.file.id, first.file.id);
+  assert.equal(storage.uploads.length, 1);
+  assert.match(first.file.id, /^file_[a-f0-9]{32}$/u);
+});
+
 void test("只能为自己的文件生成预签名 URL", async () => {
   const repository = new InMemoryFilesRepository();
   const storage = new FakeStorageService();
