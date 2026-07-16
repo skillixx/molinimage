@@ -41,9 +41,11 @@ import { BillingReconciliationService } from "../modules/billing/billing-reconci
 import { PricingRuleService } from "../modules/billing/pricing-rule-service.js";
 import { ConsoleImageTaskAuditLogger } from "../infrastructure/audit/console-image-task-audit-logger.js";
 import { ConsolePricingRuleAuditLogger } from "../infrastructure/audit/console-pricing-rule-audit-logger.js";
+import { ConsoleImageTaskRecoveryAuditLogger } from "../infrastructure/audit/console-image-task-recovery-audit-logger.js";
 import { FileService } from "../modules/files/file-service.js";
 import { ImageModelService } from "../modules/image-models/image-model-service.js";
 import { ImageTaskService } from "../modules/image-tasks/image-task-service.js";
+import { ImageTaskRecoveryService } from "../modules/image-tasks/image-task-recovery-service.js";
 import { RiskControlService } from "../modules/risk-control/risk-control-service.js";
 import { StylePresetService } from "../modules/style-presets/style-preset-service.js";
 import { PromptOptimizationService } from "../modules/prompts/prompt-optimization-service.js";
@@ -111,6 +113,14 @@ const billingReconciliationService = new BillingReconciliationService(
   imageTaskService,
   billingService
 );
+const imageTaskRecoveryService = new ImageTaskRecoveryService(
+  {
+    findById: (taskId) => imageTasksRepository.findById(taskId),
+    findFailedTasks: (input) => imageTasksRepository.findFailedTasks(input)
+  },
+  imageTaskService,
+  new ConsoleImageTaskRecoveryAuditLogger()
+);
 const imageGenerationClient = new HttpAiGatewayImageGenerationClient(config);
 const imageEditClient = new HttpAiGatewayImageEditClient(config);
 const visionTextClient = new HttpAiGatewayVisionTextClient(config);
@@ -168,6 +178,7 @@ const server = createServer(
     billingService,
     billingRecordService,
     billingReconciliationService,
+    imageTaskRecoveryService,
     pricingRuleService,
     stylePresetService,
     promptOptimizationService,

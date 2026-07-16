@@ -76,7 +76,7 @@ Redis / BullMQ
 | G04  | BullMQ 队列与 Outbox         | 已完成 | G01       |
 | G05  | 独立 Worker 消费任务         | 已完成 | G04       |
 | G06  | API 和前端异步化             | 已完成 | G05       |
-| G07  | 重试、恢复和死信处理         | 待执行 | G06       |
+| G07  | 重试、恢复和死信处理         | 已完成 | G06       |
 | G08  | 健康检查、监控与管理能力     | 待执行 | G07       |
 | G09  | 集成测试、灰度切换和部署验收 | 待执行 | G08       |
 
@@ -447,6 +447,16 @@ dispatched_at
 - API、Worker 和 Redis 分别重启后不会丢任务。
 - 多次投递和多 Worker 不会重复扣费。
 - 所有最终失败任务都有明确错误码和计费状态。
+
+### 实施结果（2026-07-16）
+
+- Worker 使用 `ImageTaskProcessingError` 区分可重试与不可重试错误；AI 网关保留 HTTP 状态码，`408`、`429` 和 `5xx` 进入有限重试。
+- BullMQ 使用指数退避和 25% 抖动；中间重试仅归还数据库租约，不改变最终任务状态，不释放预占积分。
+- 不可重试错误使用 BullMQ `UnrecoverableError` 跳过剩余尝试；失败 Job 保留在 failed 集合，达到最大次数后才由 `ImageTaskService` 进入最终失败并释放积分。
+- `ImageTaskRecoveryScanner` 周期扫描长时间停留在 `billing_reserved`、`queued` 和租约过期的 `running` 任务；未耗尽次数的任务原子回收并重新投递，次数耗尽的任务进入最终失败。
+- 管理员可访问 `/admin/task-recovery` 查看错误码、公开错误说明、Worker 尝试次数和最新计费状态，并通过显式 retry task 重新投递。
+- 已补充结构化错误、重试耗尽、不可重试、恢复扫描、人工重投和管理 API 测试；真实 MySQL 与 Redis 队列集成测试通过。
+- 已有 Outbox 新 Dispatcher 接管覆盖 API 重启，数据库过期租约接管覆盖 Worker 重启，Redis 断连后补投覆盖连接恢复；G09 再执行生产进程和 Redis 实例的破坏性重启演练。
 
 ## 14. G08 健康检查、监控与管理能力
 

@@ -14,7 +14,8 @@ import type {
   CreateImageTaskRecordInput,
   ImageTaskRecord,
   ImageTasksRepository,
-  TransitionImageTaskInput
+  TransitionImageTaskInput,
+  UpdateFailedImageTaskReasonInput
 } from "../src/infrastructure/database/image-tasks-repository.js";
 import type { ImageTaskCreationRepository } from "../src/infrastructure/database/image-task-outbox-repository.js";
 import {
@@ -733,6 +734,36 @@ void test("预占后的任务失败会释放积分，AI 网关失败不扣费", 
   );
 });
 
+void test("恢复终结会先落失败终态再释放积分并恢复真实错误码", async () => {
+  const repository = new InMemoryImageTasksRepository();
+  const billingService = new FakeBillingService();
+  const service = new ImageTaskService(repository, billingService);
+  const created = await service.createTask({
+    ownerUserId: 479,
+    taskType: "text_to_image",
+    imageCount: 1,
+    entitlementId: 62
+  });
+  await service.transitionTask({ ownerUserId: 479, taskId: created.task.id, toStatus: "queued" });
+  await service.transitionTask({ ownerUserId: 479, taskId: created.task.id, toStatus: "running" });
+  billingService.releaseObserver = () => {
+    assert.equal(repository.records.get(created.task.id)?.status, "failed");
+    assert.equal(repository.records.get(created.task.id)?.error_code, "BILLING_RELEASE_PENDING");
+  };
+
+  const failed = await service.finalizeClaimedFailure({
+    ownerUserId: 479,
+    taskId: created.task.id,
+    errorCode: "IMAGE_TASK_RETRY_EXHAUSTED",
+    errorMessage: "任务重试次数已耗尽。",
+    workerLockToken: "recovery-lock"
+  });
+
+  assert.equal(failed.task.status, "failed");
+  assert.equal(failed.task.error_code, "IMAGE_TASK_RETRY_EXHAUSTED");
+  assert.equal(billingService.releaseRequests.length, 1);
+});
+
 void test("成功任务结算失败时保留结果并进入 billing_pending", async () => {
   const repository = new InMemoryImageTasksRepository();
   const billingService = new FakeBillingService(false);
@@ -1113,6 +1144,33 @@ class InMemoryImageTasksRepository implements ImageTasksRepository {
     return Promise.resolve(updated);
   }
 
+  isExecutionActive(input: { taskId: string; lockToken: string }): Promise<boolean> {
+    void input.lockToken;
+    return Promise.resolve(this.records.get(input.taskId)?.status === "running");
+  }
+
+  updateFailedReason(
+    input: UpdateFailedImageTaskReasonInput
+  ): Promise<ImageTaskRecord | undefined> {
+    const record = this.records.get(input.taskId);
+
+    if (
+      record?.owner_user_id !== input.ownerUserId ||
+      record.status !== "failed" ||
+      record.error_code !== input.expectedErrorCode
+    ) {
+      return Promise.resolve(undefined);
+    }
+
+    const updated = {
+      ...record,
+      error_code: input.errorCode,
+      error_message: input.errorMessage
+    };
+    this.records.set(updated.id, updated);
+    return Promise.resolve(updated);
+  }
+
   findHistoryByOwner(input: {
     ownerUserId: number;
     taskType?: string;
@@ -1210,6 +1268,7 @@ class FakeBillingService {
   readonly reserveRequests: ReserveBillingRequest[] = [];
   readonly releaseRequests: ReleaseBillingRequest[] = [];
   readonly settleRequests: SettleBillingRequest[] = [];
+  releaseObserver: (() => void) | undefined;
 
   constructor(private settleShouldSucceed = true) {}
 
@@ -1255,6 +1314,7 @@ class FakeBillingService {
   }
 
   release(request: ReleaseBillingRequest): Promise<ReleaseBillingResult> {
+    this.releaseObserver?.();
     this.releaseRequests.push(request);
 
     return Promise.resolve({

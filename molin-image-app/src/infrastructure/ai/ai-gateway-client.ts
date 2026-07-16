@@ -94,6 +94,25 @@ export interface AiGatewayPromptOptimizerClient {
   optimizePrompt(input: OptimizePromptInput): Promise<OptimizePromptResult>;
 }
 
+/** AI 网关 HTTP 错误保留状态码，供异步 Worker 判断是否需要重试。 */
+export class AiGatewayRequestError extends Error {
+  readonly retryable: boolean;
+
+  constructor(
+    public readonly statusCode: number,
+    message: string
+  ) {
+    super(message);
+    this.name = "AiGatewayRequestError";
+    // 429、超时类状态和网关 5xx 通常是短暂故障；其余 4xx 视为参数或能力错误。
+    this.retryable = statusCode === 408 || statusCode === 429 || statusCode >= 500;
+  }
+}
+
+function createGatewayRequestError(response: Response, payload: unknown): AiGatewayRequestError {
+  return new AiGatewayRequestError(response.status, readGatewayErrorMessage(payload));
+}
+
 export class EnvAiGatewayModelCatalogClient implements AiGatewayModelCatalogClient {
   constructor(private readonly catalogJson: string) {}
 
@@ -147,7 +166,7 @@ export class HttpAiGatewayImageGenerationClient implements AiGatewayImageGenerat
     const payload = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error(readGatewayErrorMessage(payload));
+      throw createGatewayRequestError(response, payload);
     }
 
     return parseGenerateImageResult(payload, response.headers.get("x-request-id"));
@@ -237,7 +256,7 @@ export class HttpAiGatewayImageGenerationClient implements AiGatewayImageGenerat
     const payload = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error(readGatewayErrorMessage(payload));
+      throw createGatewayRequestError(response, payload);
     }
 
     return parseGenerateImageResult(payload, response.headers.get("x-request-id"));
@@ -332,7 +351,7 @@ export class HttpAiGatewayImageEditClient implements AiGatewayImageEditClient {
     const payload = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error(readGatewayErrorMessage(payload));
+      throw createGatewayRequestError(response, payload);
     }
 
     return parseGenerateImageResult(payload, response.headers.get("x-request-id"));
@@ -376,7 +395,7 @@ export class HttpAiGatewayImageEditClient implements AiGatewayImageEditClient {
     const payload = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error(readGatewayErrorMessage(payload));
+      throw createGatewayRequestError(response, payload);
     }
 
     return parseOpenRouterChatImageResult(payload, response.headers.get("x-request-id"));
@@ -432,7 +451,7 @@ export class HttpAiGatewayVisionTextClient implements AiGatewayVisionTextClient 
     const payload = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error(readGatewayErrorMessage(payload));
+      throw createGatewayRequestError(response, payload);
     }
 
     return parseAnalyzeImageResult(payload, response.headers.get("x-request-id"));
@@ -481,7 +500,7 @@ export class HttpAiGatewayPromptOptimizerClient implements AiGatewayPromptOptimi
     const payload = await response.json().catch(() => ({}));
 
     if (!response.ok) {
-      throw new Error(readGatewayErrorMessage(payload));
+      throw createGatewayRequestError(response, payload);
     }
 
     return parseOptimizePromptResult(payload, response.headers.get("x-request-id"));

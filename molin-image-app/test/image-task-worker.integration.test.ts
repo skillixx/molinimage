@@ -22,6 +22,7 @@ import { ImageTaskService } from "../src/modules/image-tasks/image-task-service.
 import { BullMqImageTaskWorker } from "../src/workers/bullmq-image-task-worker.js";
 import type { ImageTaskWorkerExecutionContext } from "../src/workers/image-generation-worker-service.js";
 import { ImageTaskJobProcessor } from "../src/workers/image-task-job-processor.js";
+import { ImageTaskRecoveryScanner } from "../src/workers/image-task-recovery-scanner.js";
 
 const runQueueIntegrationTest =
   process.env.RUN_QUEUE_INTEGRATION_TESTS === "true" ? test : test.skip;
@@ -50,7 +51,16 @@ void runQueueIntegrationTest(
     const expiredTaskId = `task_g05_exp_${suffix.slice(0, 18)}`;
     const slowTaskId = `task_g05_slow_${suffix.slice(0, 17)}`;
     const fencedTaskId = `task_g05_fence_${suffix.slice(0, 16)}`;
-    const allTaskIds = [...taskIds, expiredTaskId, slowTaskId, fencedTaskId];
+    const recoveryTaskId = `task_g07_recover_${suffix.slice(0, 14)}`;
+    const exhaustedTaskId = `task_g07_exhaust_${suffix.slice(0, 14)}`;
+    const allTaskIds = [
+      ...taskIds,
+      expiredTaskId,
+      slowTaskId,
+      fencedTaskId,
+      recoveryTaskId,
+      exhaustedTaskId
+    ];
     const callCounts = new Map<string, number>();
     const slowStarted = createDeferred();
     const slowGate = createDeferred();
@@ -87,6 +97,51 @@ void runQueueIntegrationTest(
       await repository.create(createTaskInput(slowTaskId, "text_to_image", `g05:${suffix}:slow`));
       await repository.create(
         createTaskInput(fencedTaskId, "text_to_image", `g05:${suffix}:fence`)
+      );
+      await repository.create(
+        createTaskInput(recoveryTaskId, "text_to_image", `g07:${suffix}:recovery`)
+      );
+      await repository.create(
+        createTaskInput(exhaustedTaskId, "text_to_image", `g07:${suffix}:exhausted`)
+      );
+      await pool.execute(
+        `UPDATE image_tasks
+         SET updated_at = DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 10 MINUTE),
+             worker_attempt_count = 1
+         WHERE id = ?`,
+        [recoveryTaskId]
+      );
+      await pool.execute(
+        `UPDATE image_tasks
+         SET status = 'running',
+             worker_lock_token = 'late-worker-token',
+             worker_lock_expires_at = DATE_SUB(CURRENT_TIMESTAMP(3), INTERVAL 1 SECOND),
+             worker_attempt_count = 3
+         WHERE id = ?`,
+        [exhaustedTaskId]
+      );
+
+      const recoveryScanner = new ImageTaskRecoveryScanner(repository, producer, taskService, {
+        scanIntervalMs: 30_000,
+        staleAfterMs: 1_000,
+        batchSize: 20,
+        maxAttempts: 3
+      });
+      const recoveryResult = await recoveryScanner.scanOnce();
+      // 扫描器同时接管一个长时间 queued 任务和前面构造的过期 running 任务。
+      assert.equal(recoveryResult.requeued, 2);
+      assert.equal(recoveryResult.finalized, 1);
+      assert.ok(await inspector.getJob(recoveryTaskId));
+      assert.equal((await repository.findById(exhaustedTaskId))?.status, "failed");
+      assert.equal(
+        await repository.recordOutputFile({
+          taskId: exhaustedTaskId,
+          ownerUserId: 479,
+          fileId: "file_late_worker",
+          gatewayRequestId: "request_late_worker",
+          workerLockToken: "late-worker-token"
+        }),
+        undefined
       );
 
       const firstClaim = await repository.claimExecution({
@@ -181,9 +236,9 @@ void runQueueIntegrationTest(
         { task_id: taskIds[0] ?? "" },
         { jobId: `duplicate-${taskIds[0] ?? "task"}` }
       );
-      await waitForTasks(repository, [...taskIds, expiredTaskId], "succeeded");
+      await waitForTasks(repository, [...taskIds, expiredTaskId, recoveryTaskId], "succeeded");
 
-      for (const taskId of [...taskIds, expiredTaskId]) {
+      for (const taskId of [...taskIds, expiredTaskId, recoveryTaskId]) {
         assert.equal(callCounts.get(taskId), 1);
       }
 

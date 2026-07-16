@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>任务恢复 - 墨灵 AI 图片创作</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/admin-task-recovery.css" />
+  </head>
+  <body class="recovery-page">
+    <header class="recovery-topbar">
+      <div>
+        <p class="recovery-eyebrow">TASK RECOVERY</p>
+        <h1>任务恢复</h1>
+      </div>
+      <nav class="recovery-nav" aria-label="管理导航">
+        <a href="/admin/reconciliation">计费对账</a>
+        <a href="/admin/models">模型管理</a>
+        <a href="/">返回工作台</a>
+      </nav>
+    </header>
+
+    <main class="recovery-main">
+      <section class="recovery-toolbar" aria-labelledby="failureTitle">
+        <div>
+          <h2 id="failureTitle">最终失败任务</h2>
+          <p id="failureSummary">正在读取失败任务...</p>
+        </div>
+        <button id="refreshFailures" class="recovery-button secondary" type="button">刷新</button>
+      </section>
+
+      <div id="failureError" class="recovery-error" role="alert" hidden></div>
+      <div class="recovery-table-wrap">
+        <table class="recovery-table">
+          <thead>
+            <tr>
+              <th>任务</th>
+              <th>用户</th>
+              <th>失败原因</th>
+              <th>尝试</th>
+              <th>计费状态</th>
+              <th>更新时间</th>
+              <th class="action-column">操作</th>
+            </tr>
+          </thead>
+          <tbody id="failureRows"></tbody>
+        </table>
+      </div>
+
+      <footer class="recovery-pager">
+        <button id="failurePrev" class="recovery-button secondary" type="button">上一页</button>
+        <span id="failurePageInfo">第 1 页</span>
+        <button id="failureNext" class="recovery-button secondary" type="button">下一页</button>
+      </footer>
+    </main>
+
+    <script type="module" src="/assets/admin-task-recovery.js"></script>
+  </body>
+</html>

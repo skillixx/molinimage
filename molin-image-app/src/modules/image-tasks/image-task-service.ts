@@ -62,6 +62,14 @@ export interface RecordWorkerOutputRequest {
   workerLockToken?: string;
 }
 
+export interface FinalizeClaimedFailureRequest {
+  ownerUserId: number;
+  taskId: string;
+  errorCode: string;
+  errorMessage: string;
+  workerLockToken: string;
+}
+
 export interface ImageTaskResult {
   task: PublicImageTask;
 }
@@ -685,6 +693,76 @@ export class ImageTaskService {
     return {
       task: toPublicImageTask(updatedTask)
     };
+  }
+
+  async finalizeClaimedFailure(request: FinalizeClaimedFailureRequest): Promise<ImageTaskResult> {
+    const currentTask = await this.repository.findById(request.taskId);
+
+    if (currentTask === undefined) {
+      throw new ImageTaskServiceError("IMAGE_TASK_NOT_FOUND", "图片任务不存在。", 404);
+    }
+
+    if (currentTask.owner_user_id !== request.ownerUserId) {
+      throw new ImageTaskServiceError("IMAGE_TASK_FORBIDDEN", "不能修改他人的图片任务。", 403);
+    }
+
+    const executionActive = await this.repository.isExecutionActive?.({
+      taskId: request.taskId,
+      lockToken: request.workerLockToken
+    });
+
+    if (executionActive !== true || currentTask.status !== "running") {
+      throw new ImageTaskServiceError(
+        "IMAGE_TASK_WORKER_LEASE_LOST",
+        "任务执行权已转移，当前恢复流程不能提交最终失败。",
+        409
+      );
+    }
+
+    assertFailureReason({ ...request, toStatus: "failed" });
+    // 先原子落失败终态并清除租约，彻底阻止新 Worker 在积分释放期间重新接管任务。
+    const markedFailed = await this.repository.updateStatus({
+      taskId: request.taskId,
+      ownerUserId: request.ownerUserId,
+      fromStatus: "running",
+      toStatus: "failed",
+      errorCode: "BILLING_RELEASE_PENDING",
+      errorMessage: "任务已终止，预占积分正在释放。",
+      workerLockToken: request.workerLockToken
+    });
+
+    if (markedFailed === undefined) {
+      throw new ImageTaskServiceError(
+        "IMAGE_TASK_WORKER_LEASE_LOST",
+        "任务执行权已转移，当前恢复流程不能提交最终失败。",
+        409
+      );
+    }
+
+    const releaseResult = await this.releaseReservedBilling(currentTask, {
+      ...request,
+      toStatus: "failed"
+    });
+
+    if (releaseResult?.released === false) {
+      // 释放失败时保留 BILLING_RELEASE_PENDING，交给现有管理端对账流程继续处理。
+      return { task: toPublicImageTask(markedFailed) };
+    }
+
+    const updatedTask = await this.repository.updateFailedReason?.({
+      taskId: request.taskId,
+      ownerUserId: request.ownerUserId,
+      expectedErrorCode: "BILLING_RELEASE_PENDING",
+      errorCode: normalizeRequiredString(request.errorCode, "error_code"),
+      errorMessage: normalizeRequiredString(request.errorMessage, "error_message")
+    });
+    const finalTask = updatedTask ?? (await this.repository.findById(request.taskId));
+
+    if (finalTask === undefined) {
+      throw new ImageTaskServiceError("IMAGE_TASK_NOT_FOUND", "图片任务不存在。", 404);
+    }
+
+    return { task: toPublicImageTask(finalTask) };
   }
 
   async recordWorkerOutput(request: RecordWorkerOutputRequest): Promise<ImageTaskResult> {

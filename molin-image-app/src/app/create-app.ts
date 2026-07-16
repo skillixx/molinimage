@@ -28,6 +28,8 @@ import type {
   ImageTaskStatus
 } from "../modules/image-tasks/image-task-service.js";
 import { ImageTaskServiceError } from "../modules/image-tasks/image-task-service.js";
+import type { ImageTaskRecoveryService } from "../modules/image-tasks/image-task-recovery-service.js";
+import { ImageTaskRecoveryServiceError } from "../modules/image-tasks/image-task-recovery-service.js";
 import { RiskControlServiceError } from "../modules/risk-control/risk-control-service.js";
 import type { ImageModelService } from "../modules/image-models/image-model-service.js";
 import { ImageModelServiceError } from "../modules/image-models/image-model-service.js";
@@ -79,6 +81,7 @@ export interface AppDependencies {
     BillingReconciliationService,
     "listPending" | "retryRelease" | "retrySettle"
   >;
+  imageTaskRecoveryService?: Pick<ImageTaskRecoveryService, "listFailedTasks" | "replayFailedTask">;
   pricingRuleService?: Pick<PricingRuleService, "listRules" | "createRule" | "updateRule">;
   stylePresetService?: Pick<
     StylePresetService,
@@ -177,6 +180,22 @@ async function handleRequest(
     }
 
     await servePublicFile(response, requestId, "admin-reconciliation.html");
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/admin/task-recovery") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    // 恢复页面包含全体用户的失败任务和计费状态，只允许管理员白名单访问。
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有任务恢复管理权限。");
+      return;
+    }
+
+    await servePublicFile(response, requestId, "admin-task-recovery.html");
     return;
   }
 
@@ -737,6 +756,75 @@ async function handleRequest(
       decodeURIComponent(billingReconciliationActionMatch[1]),
       billingReconciliationActionMatch[2],
       dependencies.billingReconciliationService
+    );
+    return;
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/admin/image/task-recovery") {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    // 失败列表跨用户查询，必须先通过应用会话和管理员白名单双重校验。
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有任务恢复管理权限。");
+      return;
+    }
+
+    if (dependencies.imageTaskRecoveryService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "IMAGE_TASK_RECOVERY_SERVICE_UNAVAILABLE",
+        "任务恢复管理服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleImageTaskFailureList(
+      url,
+      response,
+      requestId,
+      dependencies.imageTaskRecoveryService
+    );
+    return;
+  }
+
+  const imageTaskReplayMatch = /^\/api\/admin\/image\/task-recovery\/([^/]+)\/replay$/u.exec(
+    url.pathname
+  );
+
+  if (request.method === "POST" && imageTaskReplayMatch !== null) {
+    if (session === undefined) {
+      writeError(response, 401, requestId, "UNAUTHORIZED", "请先从墨灵平台进入应用。");
+      return;
+    }
+
+    // 人工重投会重新预占积分，禁止普通用户绕过自己的任务重试入口调用。
+    if (!isAdminUser(session.user_id, config.adminUserIds)) {
+      writeError(response, 403, requestId, "ADMIN_FORBIDDEN", "当前用户没有任务恢复管理权限。");
+      return;
+    }
+
+    if (dependencies.imageTaskRecoveryService === undefined) {
+      writeError(
+        response,
+        503,
+        requestId,
+        "IMAGE_TASK_RECOVERY_SERVICE_UNAVAILABLE",
+        "任务恢复管理服务暂不可用。"
+      );
+      return;
+    }
+
+    await handleImageTaskReplay(
+      response,
+      requestId,
+      session.user_id,
+      decodeURIComponent(imageTaskReplayMatch[1]),
+      dependencies.imageTaskRecoveryService
     );
     return;
   }
@@ -1553,6 +1641,38 @@ async function handleBillingReconciliationAction(
   }
 }
 
+async function handleImageTaskFailureList(
+  url: URL,
+  response: ServerResponse,
+  requestId: string,
+  recoveryService: Pick<ImageTaskRecoveryService, "listFailedTasks">
+): Promise<void> {
+  try {
+    const result = await recoveryService.listFailedTasks({
+      page: readPositiveIntegerQuery(url, "page", 1),
+      pageSize: readPositiveIntegerQuery(url, "page_size", 20)
+    });
+    writeJson(response, 200, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
+async function handleImageTaskReplay(
+  response: ServerResponse,
+  requestId: string,
+  actorUserId: number,
+  taskId: string,
+  recoveryService: Pick<ImageTaskRecoveryService, "replayFailedTask">
+): Promise<void> {
+  try {
+    const result = await recoveryService.replayFailedTask({ taskId, actorUserId, requestId });
+    writeJson(response, 201, result);
+  } catch (error: unknown) {
+    writePublicError(response, requestId, error);
+  }
+}
+
 async function handleFileUpload(
   request: IncomingMessage,
   response: ServerResponse,
@@ -2029,6 +2149,11 @@ function writePublicError(response: ServerResponse, requestId: string, error: un
   }
 
   if (error instanceof ImageTaskServiceError) {
+    writeError(response, error.statusCode, requestId, error.code, error.message);
+    return;
+  }
+
+  if (error instanceof ImageTaskRecoveryServiceError) {
     writeError(response, error.statusCode, requestId, error.code, error.message);
     return;
   }

@@ -23,6 +23,11 @@ void test("BullMQ 图片任务使用固定名称、task_id JobId 和最小载荷
   assert.deepEqual(Object.keys(client.jobs[0]?.data ?? {}), ["task_id"]);
   assert.equal(client.jobs[0]?.options.jobId, "task_queue_001");
   assert.equal(client.jobs[0]?.options.attempts, 3);
+  assert.deepEqual(client.jobs[0]?.options.backoff, {
+    type: "exponential",
+    delay: 1000,
+    jitter: 0.25
+  });
   assert.equal(client.jobs[0]?.options.removeOnComplete, false);
   assert.equal(client.jobs[0]?.options.removeOnFail, false);
 });
@@ -38,6 +43,18 @@ void test("BullMQ 底层错误统一映射且不暴露连接信息", async () =>
   );
 });
 
+void test("恢复投递会替换同 task_id 的历史失败 Job", async () => {
+  const client = new RecordingBullMqQueueClient();
+  client.jobState = "failed";
+  const queue = new BullMqImageTaskQueue("molinimage-image-tasks", undefined, 3, client);
+
+  await queue.requeue("task_queue_recovery");
+
+  assert.deepEqual(client.removedJobIds, ["task_queue_recovery"]);
+  assert.equal(client.jobs.length, 1);
+  assert.equal(client.jobs[0]?.options.jobId, "task_queue_recovery");
+});
+
 class RecordingBullMqQueueClient implements BullMqQueueClient {
   readonly jobs: {
     name: typeof IMAGE_TASK_JOB_NAME;
@@ -45,6 +62,8 @@ class RecordingBullMqQueueClient implements BullMqQueueClient {
     options: Parameters<BullMqQueueClient["add"]>[2];
   }[] = [];
   addError: Error | undefined;
+  jobState = "unknown";
+  readonly removedJobIds: string[] = [];
 
   add(
     name: typeof IMAGE_TASK_JOB_NAME,
@@ -61,5 +80,15 @@ class RecordingBullMqQueueClient implements BullMqQueueClient {
 
   close(): Promise<void> {
     return Promise.resolve();
+  }
+
+  getJobState(): Promise<string> {
+    return Promise.resolve(this.jobState);
+  }
+
+  remove(jobId: string): Promise<number> {
+    this.removedJobIds.push(jobId);
+    this.jobState = "unknown";
+    return Promise.resolve(1);
   }
 }

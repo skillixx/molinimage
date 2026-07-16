@@ -10,6 +10,9 @@ export interface AppConfig {
   imageTaskWorkerConcurrency: number;
   imageTaskJobAttempts: number;
   imageTaskJobTimeoutMs: number;
+  imageTaskRecoveryScanIntervalMs?: number;
+  imageTaskStuckAfterMs?: number;
+  imageTaskRecoveryBatchSize?: number;
   imageTaskExecutionMode: "inline" | "queue";
   imageTaskOutboxPollIntervalMs: number;
   imageTaskOutboxBatchSize: number;
@@ -82,6 +85,9 @@ type OptionalEnvKey =
   | "IMAGE_TASK_WORKER_CONCURRENCY"
   | "IMAGE_TASK_JOB_ATTEMPTS"
   | "IMAGE_TASK_JOB_TIMEOUT_MS"
+  | "IMAGE_TASK_RECOVERY_SCAN_INTERVAL_MS"
+  | "IMAGE_TASK_STUCK_AFTER_MS"
+  | "IMAGE_TASK_RECOVERY_BATCH_SIZE"
   | "IMAGE_TASK_EXECUTION_MODE"
   | "IMAGE_TASK_OUTBOX_POLL_INTERVAL_MS"
   | "IMAGE_TASK_OUTBOX_BATCH_SIZE"
@@ -152,6 +158,18 @@ export function loadAppConfig(env: AppEnv = process.env): AppConfig {
     imageTaskJobTimeoutMs: readPositiveInteger(
       env.IMAGE_TASK_JOB_TIMEOUT_MS?.trim() ?? "120000",
       "IMAGE_TASK_JOB_TIMEOUT_MS"
+    ),
+    imageTaskRecoveryScanIntervalMs: readPositiveInteger(
+      env.IMAGE_TASK_RECOVERY_SCAN_INTERVAL_MS?.trim() ?? "30000",
+      "IMAGE_TASK_RECOVERY_SCAN_INTERVAL_MS"
+    ),
+    imageTaskStuckAfterMs: readPositiveInteger(
+      env.IMAGE_TASK_STUCK_AFTER_MS?.trim() ?? "300000",
+      "IMAGE_TASK_STUCK_AFTER_MS"
+    ),
+    imageTaskRecoveryBatchSize: readPositiveInteger(
+      env.IMAGE_TASK_RECOVERY_BATCH_SIZE?.trim() ?? "50",
+      "IMAGE_TASK_RECOVERY_BATCH_SIZE"
     ),
     imageTaskExecutionMode: readImageTaskExecutionMode(env.IMAGE_TASK_EXECUTION_MODE, appEnv),
     imageTaskOutboxPollIntervalMs: readPositiveInteger(

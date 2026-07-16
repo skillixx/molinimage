@@ -469,6 +469,23 @@ void test("对账管理页覆盖待对账列表、重试结算、重试释放和
   assert.match(apiClient, /retry-release/);
 });
 
+void test("任务恢复管理页展示失败原因、计费状态并支持人工重投", async () => {
+  const html = await readFile(resolve("public", "admin-task-recovery.html"), "utf8");
+  const script = await readFile(resolve("public", "assets", "admin-task-recovery.js"), "utf8");
+  const apiClient = await readFile(
+    resolve("public", "assets", "admin-task-recovery-api.js"),
+    "utf8"
+  );
+
+  assert.match(html, /最终失败任务/u);
+  assert.match(html, /失败原因/u);
+  assert.match(html, /计费状态/u);
+  assert.match(script, /replayFailedTask/u);
+  assert.match(script, /worker_attempt_count/u);
+  assert.match(apiClient, /\/api\/admin\/image\/task-recovery/u);
+  assert.match(apiClient, /\/replay/u);
+});
+
 void test("余额与消耗页覆盖积分汇总、消耗记录和任务详情跳转", async () => {
   const html = await readFile(resolve("public", "billing.html"), "utf8");
   const script = await readFile(resolve("public", "assets", "billing-records.js"), "utf8");

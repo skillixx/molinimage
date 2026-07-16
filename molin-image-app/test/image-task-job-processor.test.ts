@@ -9,10 +9,12 @@ import type {
 } from "../src/infrastructure/database/image-tasks-repository.js";
 import {
   ImageTaskJobProcessor,
+  ImageTaskJobFinalFailureError,
   ImageTaskJobTimeoutError,
   type ClaimedImageTaskProcessor,
   type ImageTaskExecutionRepository
 } from "../src/workers/image-task-job-processor.js";
+import { ImageTaskProcessingError } from "../src/workers/image-task-processing-error.js";
 
 void test("两个 Worker 同时消费同一 task_id 时只有一个获得数据库执行权", async () => {
   const repository = new InMemoryExecutionRepository("queued");
@@ -114,6 +116,199 @@ void test("长任务会续期数据库租约并在处理完成后停止心跳", 
   const renewCountAfterCompletion = repository.renewCount;
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(repository.renewCount, renewCountAfterCompletion);
+});
+
+void test("可重试错误在中间尝试只归还租约，不进入最终失败", async () => {
+  const repository = new InMemoryExecutionRepository("queued");
+  let finalFailureCalls = 0;
+  const processor = new ImageTaskJobProcessor(
+    repository,
+    {
+      processTask(): Promise<void> {
+        return Promise.reject(
+          new ImageTaskProcessingError({
+            code: "AI_GATEWAY_FAILED",
+            message: "AI 网关暂时不可用。",
+            retryable: true
+          })
+        );
+      }
+    },
+    { jobTimeoutMs: 500, lockDurationMs: 200, heartbeatIntervalMs: 50 },
+    {
+      finalizeFailure(): Promise<void> {
+        finalFailureCalls += 1;
+        return Promise.resolve();
+      }
+    }
+  );
+
+  await assert.rejects(() =>
+    processor.process({ task_id: "task_retryable" }, { attemptNumber: 1, maxAttempts: 3 })
+  );
+  assert.equal(repository.status, "queued");
+  assert.equal(repository.releaseCount, 1);
+  assert.equal(finalFailureCalls, 0);
+});
+
+void test("可重试错误恢复后下一次尝试可以成功完成", async () => {
+  const repository = new InMemoryExecutionRepository("queued");
+  let calls = 0;
+  const processor = createProcessor(repository, {
+    processTask(): Promise<void> {
+      calls += 1;
+
+      if (calls === 1) {
+        return Promise.reject(
+          new ImageTaskProcessingError({
+            code: "AI_GATEWAY_FAILED",
+            message: "AI 网关暂时不可用。",
+            retryable: true
+          })
+        );
+      }
+
+      repository.status = "succeeded";
+      return Promise.resolve();
+    }
+  });
+
+  await assert.rejects(() =>
+    processor.process({ task_id: "task_retry_then_success" }, { attemptNumber: 1, maxAttempts: 3 })
+  );
+  assert.equal(repository.status, "queued");
+  assert.equal(
+    await processor.process(
+      { task_id: "task_retry_then_success" },
+      { attemptNumber: 2, maxAttempts: 3 }
+    ),
+    "processed"
+  );
+  assert.equal(repository.status, "succeeded");
+  assert.equal(calls, 2);
+});
+
+void test("不可重试错误立即最终失败并跳过剩余尝试", async () => {
+  const repository = new InMemoryExecutionRepository("queued");
+  const finalizedCodes: string[] = [];
+  const processor = new ImageTaskJobProcessor(
+    repository,
+    {
+      processTask(): Promise<void> {
+        return Promise.reject(
+          new ImageTaskProcessingError({
+            code: "INPUT_IMAGE_REQUIRED",
+            message: "输入图片不存在。",
+            retryable: false
+          })
+        );
+      }
+    },
+    { jobTimeoutMs: 500, lockDurationMs: 200, heartbeatIntervalMs: 50 },
+    {
+      finalizeFailure(input): Promise<void> {
+        finalizedCodes.push(input.errorCode);
+        repository.status = "failed";
+        return Promise.resolve();
+      }
+    }
+  );
+
+  await assert.rejects(
+    () =>
+      processor.process({ task_id: "task_non_retryable" }, { attemptNumber: 1, maxAttempts: 3 }),
+    (error: unknown) =>
+      error instanceof ImageTaskJobFinalFailureError && error.discardRemainingAttempts
+  );
+  assert.deepEqual(finalizedCodes, ["INPUT_IMAGE_REQUIRED"]);
+  assert.equal(repository.releaseCount, 0);
+});
+
+void test("可重试错误达到最大次数后只执行一次最终失败", async () => {
+  const repository = new InMemoryExecutionRepository("queued");
+  let finalFailureCalls = 0;
+  const processor = new ImageTaskJobProcessor(
+    repository,
+    {
+      processTask(): Promise<void> {
+        return Promise.reject(
+          new ImageTaskProcessingError({
+            code: "FILE_STORAGE_FAILED",
+            message: "对象存储暂时不可用。",
+            retryable: true
+          })
+        );
+      }
+    },
+    { jobTimeoutMs: 500, lockDurationMs: 200, heartbeatIntervalMs: 50 },
+    {
+      finalizeFailure(): Promise<void> {
+        finalFailureCalls += 1;
+        repository.status = "failed";
+        return Promise.resolve();
+      }
+    }
+  );
+
+  await assert.rejects(
+    () => processor.process({ task_id: "task_exhausted" }, { attemptNumber: 3, maxAttempts: 3 }),
+    ImageTaskJobFinalFailureError
+  );
+  assert.equal(finalFailureCalls, 1);
+  assert.equal(repository.releaseCount, 0);
+});
+
+void test("两个 Worker 重复投递最终失败任务只触发一次释放处理", async () => {
+  const repository = new InMemoryExecutionRepository("queued");
+  const gate = createDeferred();
+  let processingCalls = 0;
+  let releaseCalls = 0;
+  const service: ClaimedImageTaskProcessor = {
+    async processTask(): Promise<void> {
+      processingCalls += 1;
+      await gate.promise;
+      throw new ImageTaskProcessingError({
+        code: "CONTENT_MODERATION_REJECTED",
+        message: "内容审核未通过。",
+        retryable: false
+      });
+    }
+  };
+  const finalFailureHandler = {
+    finalizeFailure(): Promise<void> {
+      releaseCalls += 1;
+      repository.status = "failed";
+      return Promise.resolve();
+    }
+  };
+  const firstProcessor = new ImageTaskJobProcessor(
+    repository,
+    service,
+    { jobTimeoutMs: 500, lockDurationMs: 200, heartbeatIntervalMs: 50 },
+    finalFailureHandler
+  );
+  const secondProcessor = new ImageTaskJobProcessor(
+    repository,
+    service,
+    { jobTimeoutMs: 500, lockDurationMs: 200, heartbeatIntervalMs: 50 },
+    finalFailureHandler
+  );
+
+  const first = firstProcessor.process(
+    { task_id: "task_duplicate_final" },
+    { attemptNumber: 1, maxAttempts: 3 }
+  );
+  await waitFor(() => processingCalls === 1);
+  const second = await secondProcessor.process(
+    { task_id: "task_duplicate_final" },
+    { attemptNumber: 1, maxAttempts: 3 }
+  );
+  gate.resolve();
+
+  await assert.rejects(first, ImageTaskJobFinalFailureError);
+  assert.equal(second, "skipped");
+  assert.equal(processingCalls, 1);
+  assert.equal(releaseCalls, 1);
 });
 
 class InMemoryExecutionRepository implements ImageTaskExecutionRepository {

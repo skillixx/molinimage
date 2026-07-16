@@ -30,6 +30,15 @@ npm test
 
 应用启动前会校验 `.env.example` 中列出的关键配置。真实环境变量值必须由本地 `.env`、部署平台或密钥管理系统提供，不能提交到仓库。
 
+队列恢复相关配置：
+
+- `IMAGE_TASK_JOB_ATTEMPTS`：单个任务最大执行次数。
+- `IMAGE_TASK_RECOVERY_SCAN_INTERVAL_MS`：Worker 扫描卡住任务的间隔。
+- `IMAGE_TASK_STUCK_AFTER_MS`：`billing_reserved`、`queued` 任务被判定为卡住的时长。
+- `IMAGE_TASK_RECOVERY_BATCH_SIZE`：每轮恢复扫描的最大任务数。
+
+管理员可通过 `/admin/task-recovery` 查看最终失败原因、尝试次数和计费状态，并创建幂等的 retry task 重新投递。中间队列重试不会提前释放预占积分。
+
 ## 数据库迁移
 
 - `npm run db:migrate`：执行尚未应用的 `migrations/*.up.sql`。

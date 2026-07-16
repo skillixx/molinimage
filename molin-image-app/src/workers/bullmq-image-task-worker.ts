@@ -1,11 +1,14 @@
-import { Worker, type Job } from "bullmq";
+import { UnrecoverableError, Worker, type Job } from "bullmq";
 import type { Redis } from "ioredis";
 
 import {
   IMAGE_TASK_JOB_NAME,
   type ImageTaskJobData
 } from "../infrastructure/queue/image-task-queue.js";
-import type { ImageTaskJobProcessor } from "./image-task-job-processor.js";
+import {
+  ImageTaskJobFinalFailureError,
+  type ImageTaskJobProcessor
+} from "./image-task-job-processor.js";
 
 export interface BullMqImageTaskWorkerLogger {
   info(message: string): void;
@@ -65,6 +68,21 @@ export class BullMqImageTaskWorker {
       throw new Error("图片任务队列消息契约不合法。");
     }
 
-    await processor.process({ task_id: job.data.task_id });
+    try {
+      await processor.process(
+        { task_id: job.data.task_id },
+        {
+          attemptNumber: job.attemptsMade + 1,
+          maxAttempts: job.opts.attempts ?? 1
+        }
+      );
+    } catch (error: unknown) {
+      if (error instanceof ImageTaskJobFinalFailureError && error.discardRemainingAttempts) {
+        // 稳定业务错误不再消耗后续队列尝试，但 Job 仍保留在 failed 集合供管理端排查。
+        throw new UnrecoverableError(error.message);
+      }
+
+      throw error;
+    }
   }
 }

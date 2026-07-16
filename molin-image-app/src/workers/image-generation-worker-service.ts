@@ -1,15 +1,16 @@
 import { randomUUID } from "node:crypto";
 
-import type {
-  AiGatewayImageEditClient,
-  AiGatewayImageGenerationClient,
-  AiGatewayVisionTextClient
+import {
+  AiGatewayRequestError,
+  type AiGatewayImageEditClient,
+  type AiGatewayImageGenerationClient,
+  type AiGatewayVisionTextClient
 } from "../infrastructure/ai/ai-gateway-client.js";
-import type { AiGatewayCallLogsRepository } from "../infrastructure/database/ai-gateway-call-logs-repository.js";
 import type {
   ImageTaskRecord,
   ImageTasksRepository
 } from "../infrastructure/database/image-tasks-repository.js";
+import type { AiGatewayCallLogsRepository } from "../infrastructure/database/ai-gateway-call-logs-repository.js";
 import {
   FileServiceError,
   type FileContentResult,
@@ -20,6 +21,7 @@ import type {
   PublicImageTask
 } from "../modules/image-tasks/image-task-service.js";
 import { ImageTaskServiceError } from "../modules/image-tasks/image-task-service.js";
+import { ImageTaskProcessingError } from "./image-task-processing-error.js";
 import {
   buildImageEditPromptWithTemplate,
   buildImageRestorePromptWithTemplate,
@@ -71,7 +73,11 @@ export class ImageGenerationWorkerService {
     const task = await this.taskRepository.findById(taskId);
 
     if (task === undefined) {
-      throw new Error("图片任务不存在，worker 无法处理。");
+      throw new ImageTaskProcessingError({
+        code: "IMAGE_TASK_NOT_FOUND",
+        message: "图片任务不存在，Worker 无法处理。",
+        retryable: false
+      });
     }
 
     await this.prepareTaskForExecution(task, executionContext);
@@ -93,7 +99,11 @@ export class ImageGenerationWorkerService {
     }
 
     if (task.task_type !== "text_to_image") {
-      throw new Error("当前 worker 只处理文生图、图生文、图生图、图片修复和高清放大任务。");
+      throw new ImageTaskProcessingError({
+        code: "TASK_TYPE_UNSUPPORTED",
+        message: "当前 Worker 不支持该图片任务类型。",
+        retryable: false
+      });
     }
 
     if (task.prompt === null || task.prompt.trim().length === 0) {
@@ -198,7 +208,9 @@ export class ImageGenerationWorkerService {
         task,
         errorCode,
         resolvePublicWorkerErrorMessage(errorCode),
-        executionContext
+        executionContext,
+        resolveWorkerFailureRetryable(error, errorCode),
+        error
       );
     }
   }
@@ -357,6 +369,7 @@ export class ImageGenerationWorkerService {
 
     const startedAt = Date.now();
     let gatewayCompleted = false;
+    let inputLoaded = false;
 
     try {
       await executionContext?.assertActive();
@@ -365,6 +378,7 @@ export class ImageGenerationWorkerService {
         task.owner_user_id,
         task.input_file_ids[0] ?? ""
       );
+      inputLoaded = true;
       const editRequest = await options.resolveRequest(inputFile);
       const edited = await this.imageEditClient.editImage({
         imageBase64: inputFile.content_base64,
@@ -429,7 +443,7 @@ export class ImageGenerationWorkerService {
       const errorCode =
         error instanceof FileServiceError
           ? error.code
-          : gatewayCompleted
+          : gatewayCompleted || !inputLoaded
             ? "FILE_STORAGE_FAILED"
             : "AI_GATEWAY_FAILED";
 
@@ -457,7 +471,9 @@ export class ImageGenerationWorkerService {
         task,
         errorCode,
         resolvePublicWorkerErrorMessage(errorCode),
-        executionContext
+        executionContext,
+        resolveWorkerFailureRetryable(error, errorCode),
+        error
       );
     }
   }
@@ -486,6 +502,7 @@ export class ImageGenerationWorkerService {
 
     const startedAt = Date.now();
     const prompt = buildVisionTextPrompt(task.prompt);
+    let inputLoaded = false;
 
     try {
       await executionContext?.assertActive();
@@ -494,6 +511,7 @@ export class ImageGenerationWorkerService {
         task.owner_user_id,
         task.input_file_ids[0] ?? ""
       );
+      inputLoaded = true;
       const analyzed = await this.visionTextClient.analyzeImage({
         imageBase64: inputFile.content_base64,
         imageMimeType: inputFile.file.mime_type,
@@ -530,6 +548,12 @@ export class ImageGenerationWorkerService {
     } catch (error: unknown) {
       throwIfExecutionInterrupted(error, executionContext);
       const message = error instanceof Error ? error.message : "AI 网关图生文调用失败。";
+      const errorCode =
+        error instanceof FileServiceError
+          ? error.code
+          : inputLoaded
+            ? "AI_GATEWAY_FAILED"
+            : "FILE_STORAGE_FAILED";
 
       await this.aiGatewayLogsRepository.create({
         id: `ailog_${randomUUID().replaceAll("-", "")}`,
@@ -543,14 +567,16 @@ export class ImageGenerationWorkerService {
         usage_json: null,
         input_summary: `input_file=${task.input_file_ids[0] ?? ""}; prompt=${summarizeText(prompt)}`,
         output_summary: null,
-        error_code: "AI_GATEWAY_FAILED",
+        error_code: errorCode,
         error_message: message
       });
       return await this.failTask(
         task,
-        "AI_GATEWAY_FAILED",
-        resolvePublicWorkerErrorMessage("AI_GATEWAY_FAILED"),
-        executionContext
+        errorCode,
+        resolvePublicWorkerErrorMessage(errorCode),
+        executionContext,
+        resolveWorkerFailureRetryable(error, errorCode),
+        error
       );
     }
   }
@@ -559,17 +585,24 @@ export class ImageGenerationWorkerService {
     task: { id: string; owner_user_id: number },
     code: string,
     message: string,
-    executionContext?: ImageTaskWorkerExecutionContext
+    executionContext?: ImageTaskWorkerExecutionContext,
+    retryable = false,
+    cause?: unknown
   ): Promise<ProcessImageTaskResult> {
     await executionContext?.assertActive();
+
+    if (executionContext !== undefined) {
+      // 队列模式只抛出结构化错误，由 Job Processor 根据尝试次数决定重试或最终释放积分。
+      throw new ImageTaskProcessingError({ code, message, retryable, cause });
+    }
+
     // 失败流转由 ImageTaskService 统一释放预占积分，worker 不直接操作计费模块。
     return await this.taskService.transitionTask({
       ownerUserId: task.owner_user_id,
       taskId: task.id,
       toStatus: "failed",
       errorCode: code,
-      errorMessage: message,
-      workerLockToken: executionContext?.workerLockToken
+      errorMessage: message
     });
   }
 
@@ -698,6 +731,28 @@ export class ImageGenerationWorkerService {
     // 模板停用不阻断已进入 worker 的历史任务；缺失时使用内置提示词兜底。
     return preset?.prompt_template ?? null;
   }
+}
+
+function resolveWorkerFailureRetryable(error: unknown, errorCode: string): boolean {
+  if (error instanceof AiGatewayRequestError) {
+    return error.retryable;
+  }
+
+  if (error instanceof FileServiceError) {
+    // 文件不存在、归属不符和输入格式错误属于稳定业务错误，重复执行不会自行恢复。
+    return false;
+  }
+
+  if (error instanceof ImageTaskServiceError) {
+    return error.code === "IMAGE_TASK_WORKER_LEASE_LOST";
+  }
+
+  if (error instanceof Error && error.message.includes("AI_GATEWAY_API_KEY")) {
+    return false;
+  }
+
+  // 网关网络异常、MySQL 瞬时断连和 MinIO 连接异常通常没有统一错误类型，默认交给有限重试。
+  return errorCode === "AI_GATEWAY_FAILED" || errorCode === "FILE_STORAGE_FAILED";
 }
 
 function resolvePublicWorkerErrorMessage(errorCode: string): string {

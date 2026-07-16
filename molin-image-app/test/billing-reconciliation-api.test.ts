@@ -97,6 +97,34 @@ void test("管理员可打开对账页、查看待对账列表并触发重试", 
   }
 });
 
+void test("管理员可查看最终失败任务并人工重新投递", async () => {
+  const recoveryService = new FakeImageTaskRecoveryService();
+  const app = await startTestApp(new FakeBillingReconciliationService(), recoveryService);
+
+  try {
+    const cookie = await createSessionCookie(app.baseUrl);
+    const pageResponse = await fetch(`${app.baseUrl}/admin/task-recovery`, {
+      headers: { cookie }
+    });
+    const listResponse = await fetch(`${app.baseUrl}/api/admin/image/task-recovery`, {
+      headers: { cookie }
+    });
+    const replayResponse = await fetch(
+      `${app.baseUrl}/api/admin/image/task-recovery/task_failed/replay`,
+      { method: "POST", headers: { cookie } }
+    );
+    const listBody = (await listResponse.json()) as { items: { error_code: string }[] };
+
+    assert.equal(pageResponse.status, 200);
+    assert.equal(listResponse.status, 200);
+    assert.equal(listBody.items[0]?.error_code, "AI_GATEWAY_FAILED");
+    assert.equal(replayResponse.status, 201);
+    assert.deepEqual(recoveryService.replayedTaskIds, ["task_failed"]);
+  } finally {
+    await app.close();
+  }
+});
+
 class FakeBillingReconciliationService {
   readonly settleTaskIds: string[] = [];
   readonly releaseTaskIds: string[] = [];
@@ -126,6 +154,40 @@ class FakeBillingReconciliationService {
   }
 }
 
+class FakeImageTaskRecoveryService {
+  readonly replayedTaskIds: string[] = [];
+
+  listFailedTasks() {
+    return Promise.resolve({
+      items: [
+        {
+          id: "task_failed",
+          owner_user_id: 479,
+          task_type: "text_to_image",
+          error_code: "AI_GATEWAY_FAILED",
+          error_message: "AI 模型服务调用失败。",
+          worker_attempt_count: 3,
+          billing_event_id: "billing_reserve_001",
+          billing_status: "released",
+          created_at: "2026-07-16T00:00:00.000Z",
+          updated_at: "2026-07-16T00:05:00.000Z"
+        }
+      ],
+      page: 1,
+      page_size: 20,
+      total: 1
+    });
+  }
+
+  replayFailedTask(input: { taskId: string }) {
+    this.replayedTaskIds.push(input.taskId);
+    return Promise.resolve({
+      task: createPublicTask("task_retry"),
+      retried_from_task_id: input.taskId
+    });
+  }
+}
+
 class FakeLaunchTicketVerifier implements LaunchTicketVerifier {
   verifyLaunchTicket(): Promise<MolingLaunchIdentity> {
     return Promise.resolve({
@@ -136,7 +198,10 @@ class FakeLaunchTicketVerifier implements LaunchTicketVerifier {
   }
 }
 
-async function startTestApp(reconciliationService: FakeBillingReconciliationService): Promise<{
+async function startTestApp(
+  reconciliationService: FakeBillingReconciliationService,
+  recoveryService?: FakeImageTaskRecoveryService
+): Promise<{
   baseUrl: string;
   close: () => Promise<void>;
 }> {
@@ -144,7 +209,8 @@ async function startTestApp(reconciliationService: FakeBillingReconciliationServ
     createAppRequestHandler(testConfig, {
       launchTicketVerifier: new FakeLaunchTicketVerifier(),
       sessionStore: new InMemorySessionStore(),
-      billingReconciliationService: reconciliationService
+      billingReconciliationService: reconciliationService,
+      imageTaskRecoveryService: recoveryService
     })
   );
 
@@ -160,6 +226,38 @@ async function startTestApp(reconciliationService: FakeBillingReconciliationServ
   return {
     baseUrl: `http://127.0.0.1:${String(tcpAddress.port)}`,
     close: () => close(server)
+  };
+}
+
+function createPublicTask(id: string) {
+  return {
+    id,
+    source_task_id: null,
+    source_file_id: null,
+    owner_user_id: 479,
+    task_type: "text_to_image",
+    status: "billing_reserved" as const,
+    prompt: "测试",
+    negative_prompt: null,
+    style_preset_id: null,
+    input_file_ids: [],
+    output_file_ids: [],
+    text_result: null,
+    gateway_model_code: "image-model",
+    gateway_capability: "image_generation",
+    gateway_request_id: null,
+    quality: "standard",
+    image_size: "1024x1024",
+    image_count: 1,
+    upscale_factor: null,
+    cost_points: "6",
+    billing_event_id: "billing_retry",
+    error_code: null,
+    error_message: null,
+    is_favorited: false,
+    deleted_at: null,
+    created_at: "2026-07-16T00:00:00.000Z",
+    updated_at: "2026-07-16T00:00:00.000Z"
   };
 }
 

@@ -2,10 +2,43 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AiGatewayRequestError,
   HttpAiGatewayImageEditClient,
   HttpAiGatewayImageGenerationClient,
   HttpAiGatewayPromptOptimizerClient
 } from "../src/infrastructure/ai/ai-gateway-client.js";
+
+void test("AI 网关 429 错误标记为可重试且保留 HTTP 状态码", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = () =>
+    Promise.resolve(
+      new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+        status: 429,
+        headers: { "content-type": "application/json" }
+      })
+    );
+
+  try {
+    const client = new HttpAiGatewayImageGenerationClient({
+      aiGatewayBaseUrl: "https://gateway.example.com/v1",
+      aiGatewayApiKey: "test-key"
+    });
+
+    await assert.rejects(
+      () =>
+        client.generateImage({
+          model: "image-model",
+          prompt: "测试限流",
+          size: "1024x1024",
+          count: 1
+        }),
+      (error: unknown) =>
+        error instanceof AiGatewayRequestError && error.statusCode === 429 && error.retryable
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 void test("OpenRouter 文生图使用官方比例参数并解析 data 图片结果", async () => {
   const originalFetch = globalThis.fetch;

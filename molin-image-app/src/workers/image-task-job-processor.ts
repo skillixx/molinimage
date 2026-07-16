@@ -2,10 +2,15 @@ import { randomUUID } from "node:crypto";
 
 import type {
   ClaimImageTaskExecutionInput,
-  ImageTaskExecutionClaim
+  ImageTaskExecutionClaim,
+  ImageTaskRecord
 } from "../infrastructure/database/image-tasks-repository.js";
 import type { ImageTaskJobData } from "../infrastructure/queue/image-task-queue.js";
 import type { ImageTaskWorkerExecutionContext } from "./image-generation-worker-service.js";
+import {
+  ImageTaskProcessingError,
+  toImageTaskProcessingError
+} from "./image-task-processing-error.js";
 
 export interface ImageTaskExecutionRepository {
   claimExecution(input: ClaimImageTaskExecutionInput): Promise<ImageTaskExecutionClaim | undefined>;
@@ -24,6 +29,20 @@ export interface ClaimedImageTaskProcessor {
   processTask(taskId: string, context: ImageTaskWorkerExecutionContext): Promise<unknown>;
 }
 
+export interface ImageTaskJobAttemptContext {
+  attemptNumber: number;
+  maxAttempts: number;
+}
+
+export interface ImageTaskFinalFailureHandler {
+  finalizeFailure(input: {
+    task: ImageTaskRecord;
+    workerLockToken: string;
+    errorCode: string;
+    errorMessage: string;
+  }): Promise<void>;
+}
+
 export type ImageTaskJobProcessOutcome = "processed" | "skipped";
 
 export class ImageTaskJobTimeoutError extends Error {
@@ -40,6 +59,16 @@ export class ImageTaskExecutionLeaseLostError extends Error {
   }
 }
 
+export class ImageTaskJobFinalFailureError extends Error {
+  constructor(
+    public readonly code: string,
+    public readonly discardRemainingAttempts: boolean
+  ) {
+    super("图片任务已达到最终失败状态。");
+    this.name = "ImageTaskJobFinalFailureError";
+  }
+}
+
 export class ImageTaskJobProcessor {
   private readonly lockDurationMs: number;
   private readonly heartbeatIntervalMs: number;
@@ -47,7 +76,8 @@ export class ImageTaskJobProcessor {
   constructor(
     private readonly repository: ImageTaskExecutionRepository,
     private readonly workerService: ClaimedImageTaskProcessor,
-    private readonly options: ImageTaskJobProcessorOptions
+    private readonly options: ImageTaskJobProcessorOptions,
+    private readonly finalFailureHandler?: ImageTaskFinalFailureHandler
   ) {
     this.lockDurationMs = options.lockDurationMs ?? Math.max(options.jobTimeoutMs * 2, 30_000);
     this.heartbeatIntervalMs =
@@ -55,7 +85,10 @@ export class ImageTaskJobProcessor {
       Math.max(1000, Math.min(10_000, Math.floor(this.lockDurationMs / 3)));
   }
 
-  async process(jobData: ImageTaskJobData): Promise<ImageTaskJobProcessOutcome> {
+  async process(
+    jobData: ImageTaskJobData,
+    attemptContext: ImageTaskJobAttemptContext = { attemptNumber: 1, maxAttempts: 3 }
+  ): Promise<ImageTaskJobProcessOutcome> {
     const taskId = normalizeTaskId(jobData.task_id);
     const lockToken = randomUUID().replaceAll("-", "");
     const claim = await this.repository.claimExecution({
@@ -131,7 +164,23 @@ export class ImageTaskJobProcessor {
         abortController.abort(error);
       }
 
-      // 非业务终态异常交回 queued，由 BullMQ 的 attempts/backoff 决定下一次消费。
+      const processingError = resolveProcessingError(error);
+      const finalAttempt = attemptContext.attemptNumber >= attemptContext.maxAttempts;
+      const shouldFinalize = !processingError.retryable || finalAttempt;
+
+      if (shouldFinalize && this.finalFailureHandler !== undefined) {
+        // 只有不可重试或次数耗尽时才进入业务终态；该路径会由 ImageTaskService 幂等释放预占积分。
+        await this.finalFailureHandler.finalizeFailure({
+          task: claim.task,
+          workerLockToken: lockToken,
+          errorCode: processingError.code,
+          errorMessage: processingError.message
+        });
+        void processing.catch(() => undefined);
+        throw new ImageTaskJobFinalFailureError(processingError.code, !processingError.retryable);
+      }
+
+      // 中间失败只归还数据库租约，绝不能提前把任务标记失败或释放积分。
       await this.repository.releaseExecution({ taskId, lockToken }).catch(() => false);
       void processing.catch(() => undefined);
       throw toPublicProcessingError(error);
@@ -140,6 +189,32 @@ export class ImageTaskJobProcessor {
       clearTimeout(timeout);
     }
   }
+}
+
+function resolveProcessingError(error: unknown): ImageTaskProcessingError {
+  if (error instanceof ImageTaskJobTimeoutError) {
+    return new ImageTaskProcessingError({
+      code: "IMAGE_TASK_TIMEOUT",
+      message: "图片任务执行超时，请等待系统自动重试。",
+      retryable: true,
+      cause: error
+    });
+  }
+
+  if (error instanceof ImageTaskExecutionLeaseLostError) {
+    return new ImageTaskProcessingError({
+      code: "IMAGE_TASK_WORKER_LEASE_LOST",
+      message: "图片任务执行权已转移，请等待系统自动重试。",
+      retryable: true,
+      cause: error
+    });
+  }
+
+  return toImageTaskProcessingError(error, {
+    code: "IMAGE_TASK_WORKER_FAILED",
+    message: "图片任务执行异常，请等待系统自动重试。",
+    retryable: true
+  });
 }
 
 function normalizeTaskId(value: unknown): string {
@@ -161,6 +236,10 @@ function toPublicProcessingError(error: unknown): Error {
     error instanceof ImageTaskExecutionLeaseLostError
   ) {
     return error;
+  }
+
+  if (error instanceof ImageTaskProcessingError) {
+    return new Error(error.message);
   }
 
   // BullMQ 失败原因只保留稳定中文信息，不能把 Provider、Redis 或数据库原始异常写进队列。

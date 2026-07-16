@@ -23,6 +23,7 @@ import {
   RedisHealthCheckError
 } from "../infrastructure/redis/redis-health-check.js";
 import { MinioStorageService } from "../infrastructure/storage/minio-storage-service.js";
+import { BullMqImageTaskQueue } from "../infrastructure/queue/bullmq-image-task-queue.js";
 import { BillingService } from "../modules/billing/billing-service.js";
 import { FileService } from "../modules/files/file-service.js";
 import { ImageTaskService } from "../modules/image-tasks/image-task-service.js";
@@ -30,6 +31,7 @@ import { StylePresetService } from "../modules/style-presets/style-preset-servic
 import { BullMqImageTaskWorker } from "./bullmq-image-task-worker.js";
 import { ImageGenerationWorkerService } from "./image-generation-worker-service.js";
 import { ImageTaskJobProcessor } from "./image-task-job-processor.js";
+import { ImageTaskRecoveryScanner } from "./image-task-recovery-scanner.js";
 import { SharpImageOutputPostProcessor } from "./image-output-post-processor.js";
 
 async function main(): Promise<void> {
@@ -37,6 +39,8 @@ async function main(): Promise<void> {
   const redisConnection = createBullMqRedisConnection(config, "worker");
   const databasePool = createDatabasePool(config);
   let queueWorker: BullMqImageTaskWorker | undefined;
+  let recoveryQueue: BullMqImageTaskQueue | undefined;
+  let recoveryScanner: ImageTaskRecoveryScanner | undefined;
 
   try {
     await redisConnection.connect();
@@ -76,6 +80,19 @@ async function main(): Promise<void> {
       {
         jobTimeoutMs: config.imageTaskJobTimeoutMs,
         lockDurationMs: workerLockDurationMs
+      },
+      {
+        async finalizeFailure(input): Promise<void> {
+          // 最终失败必须经过业务服务释放积分；队列和 Worker 不直接调用计费 Provider。
+          await imageTaskService.transitionTask({
+            ownerUserId: input.task.owner_user_id,
+            taskId: input.task.id,
+            toStatus: "failed",
+            errorCode: input.errorCode,
+            errorMessage: input.errorMessage,
+            workerLockToken: input.workerLockToken
+          });
+        }
       }
     );
     queueWorker = new BullMqImageTaskWorker(
@@ -85,9 +102,38 @@ async function main(): Promise<void> {
       workerLockDurationMs,
       jobProcessor
     );
+    recoveryQueue = new BullMqImageTaskQueue(
+      config.imageTaskQueueName,
+      redisConnection.client,
+      config.imageTaskJobAttempts
+    );
+    recoveryScanner = new ImageTaskRecoveryScanner(
+      {
+        findRecoverableStuckTasks: (input) => imageTasksRepository.findRecoverableStuckTasks(input),
+        recoverStuckExecution: (input) => imageTasksRepository.recoverStuckExecution(input),
+        claimStuckTaskFinalization: (input) =>
+          imageTasksRepository.claimStuckTaskFinalization(input)
+      },
+      recoveryQueue,
+      imageTaskService,
+      {
+        scanIntervalMs: config.imageTaskRecoveryScanIntervalMs ?? 30_000,
+        staleAfterMs: config.imageTaskStuckAfterMs ?? 300_000,
+        batchSize: config.imageTaskRecoveryBatchSize ?? 50,
+        maxAttempts: config.imageTaskJobAttempts,
+        finalizationLockDurationMs: workerLockDurationMs
+      }
+    );
     await queueWorker.waitUntilReady();
+    recoveryScanner.start();
   } catch (error: unknown) {
-    await Promise.allSettled([queueWorker?.close(), redisConnection.close(), databasePool.end()]);
+    await Promise.allSettled([
+      recoveryScanner?.stop(),
+      queueWorker?.close(),
+      recoveryQueue?.close(),
+      redisConnection.close(),
+      databasePool.end()
+    ]);
     throw error;
   }
 
@@ -100,6 +146,8 @@ async function main(): Promise<void> {
     // 重复退出信号共用同一关闭流程，先停 BullMQ 领取，再关闭 Redis 与 MySQL。
     shutdownPromise ??= shutdownWorker(
       queueWorker,
+      recoveryScanner,
+      recoveryQueue,
       async () => {
         await redisConnection.close();
       },
@@ -123,6 +171,8 @@ void main().catch((error: unknown) => {
 
 async function shutdownWorker(
   queueWorker: BullMqImageTaskWorker,
+  recoveryScanner: ImageTaskRecoveryScanner | undefined,
+  recoveryQueue: BullMqImageTaskQueue | undefined,
   closeRedis: () => Promise<void>,
   closeDatabase: () => Promise<void>,
   signal: NodeJS.Signals
@@ -131,7 +181,13 @@ async function shutdownWorker(
   const closeResults: PromiseSettledResult<void>[] = [];
 
   // 必须先等待 BullMQ 当前处理函数结束，不能并行关闭它仍在使用的 Redis、MySQL 和 MinIO 依赖。
-  closeResults.push(...(await Promise.allSettled([queueWorker.close()])));
+  closeResults.push(
+    ...(await Promise.allSettled([
+      recoveryScanner?.stop(),
+      queueWorker.close(),
+      recoveryQueue?.close()
+    ]))
+  );
   closeResults.push(...(await Promise.allSettled([closeRedis(), closeDatabase()])));
 
   if (closeResults.some((result) => result.status === "rejected")) {
