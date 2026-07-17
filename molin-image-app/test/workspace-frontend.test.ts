@@ -163,6 +163,23 @@ void test("终态结果统一提供创建新任务入口并防止重复点击", 
   assert.match(styles, /@media[\s\S]*\.terminal-task-actions/);
 });
 
+void test("创建新任务会建立新的幂等草稿并安全清理旧任务上下文", async () => {
+  const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
+
+  assert.match(workbench, /function startNewDraft/);
+  assert.match(workbench, /draftIdempotencyKey/);
+  assert.match(workbench, /state\.draftIdempotencyKey \?\? createSubmissionIdempotencyKey\(\)/);
+  assert.match(
+    workbench,
+    /function startNewDraft[\s\S]*clearActiveImageTask\(\)[\s\S]*sessionStorage\.removeItem\(pendingSubmissionStorageKey\)/
+  );
+  assert.match(workbench, /function resetCreationFormForMode/);
+  assert.match(workbench, /textToImageStep = 1/);
+  assert.match(workbench, /imageToImageStep = 1/);
+  assert.match(workbench, /imageRestoreStep = 1/);
+  assert.match(workbench, /imageTaskPoller\.stop\(\)/);
+});
+
 void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风格模板体验", async () => {
   const html = await readFile(resolve("public", "index.html"), "utf8");
   const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");

@@ -155,6 +155,39 @@ void test("轮询器遇到永久 HTTP 错误后停止并通知工作台", async 
   assert.equal(poller.getActiveTaskId(), null);
 });
 
+void test("切换到新任务后忽略旧任务的延迟响应", async () => {
+  let resolveOldTask!: (result: TaskResult) => void;
+  let resolveNewTask!: (result: TaskResult) => void;
+  const updates: string[] = [];
+  const poller = createImageTaskPoller({
+    loadTask: (taskId) =>
+      new Promise<TaskResult>((resolveTask) => {
+        if (taskId === "task_old_001") {
+          resolveOldTask = resolveTask;
+          return;
+        }
+        resolveNewTask = resolveTask;
+      }),
+    onTask: (result) => {
+      updates.push(result.task.status);
+    }
+  });
+
+  poller.start("task_old_001");
+  poller.start("task_new_001");
+
+  // 新草稿启动后，即使旧请求更晚返回，也不能再覆盖当前任务的界面状态。
+  resolveOldTask({ task: { status: "failed" } });
+  await flushPromises();
+  assert.deepEqual(updates, []);
+  assert.equal(poller.getActiveTaskId(), "task_new_001");
+
+  resolveNewTask({ task: { status: "succeeded" } });
+  await flushPromises();
+  assert.deepEqual(updates, ["succeeded"]);
+  assert.equal(poller.getActiveTaskId(), null);
+});
+
 async function flushPromises(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve));
 }
