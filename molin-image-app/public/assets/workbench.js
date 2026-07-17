@@ -15,7 +15,7 @@ import {
 import { createImageAnnotationEditor } from "./image-annotation-editor.js";
 import {
   createImageTaskPoller,
-  isTerminalImageTaskStatus,
+  isActiveImageTaskStatus,
   resolveImageTaskProgressStage
 } from "./image-task-poller.js";
 import {
@@ -2113,7 +2113,7 @@ function acceptAsyncImageTask(result) {
   elements.actionHint.textContent = `任务 ${result.task.id} 已进入队列，正在等待处理`;
   updatePrimaryActionState();
 
-  if (isTerminalImageTaskStatus(result.task.status)) {
+  if (!isActiveImageTaskStatus(result.task.status)) {
     void handlePolledImageTask(result);
     return;
   }
@@ -2129,17 +2129,15 @@ async function handlePolledImageTask(result) {
   elements.actionHint.textContent = resolveAsyncTaskStatusText(task);
 
   // 结算待处理时结果文件已经生成，可以先展示；轮询继续等待最终结算状态。
-  if (isTerminalImageTaskStatus(task.status) || task.status === "billing_pending") {
+  if (!isActiveImageTaskStatus(task.status) || task.status === "billing_pending") {
     renderTaskResult(result);
   }
 
-  if (!isTerminalImageTaskStatus(task.status)) {
+  if (isActiveImageTaskStatus(task.status)) {
     return;
   }
 
-  state.activeTaskId = null;
-  state.activeTaskType = null;
-  window.localStorage.removeItem(activeTaskStorageKey);
+  clearActiveImageTask();
   updatePrimaryActionState();
   await Promise.all([refreshEstimate(), refreshHistory()]);
 }
@@ -2149,13 +2147,19 @@ function handleTaskPollingError() {
 }
 
 function handleTaskPollingTerminalError(error) {
-  state.activeTaskId = null;
-  state.activeTaskType = null;
-  window.localStorage.removeItem(activeTaskStorageKey);
+  clearActiveImageTask();
   renderProgress("failed");
   if (state.mode !== "image_to_text") renderGenerationFailure();
   updatePrimaryActionState();
   showError(error instanceof Error ? error.message : "任务状态无法继续查询，请重新进入工作台。");
+}
+
+function clearActiveImageTask() {
+  // 活动任务只代表仍需轮询的服务端任务；终态或永久错误到达后必须同步释放内存与浏览器锁定。
+  imageTaskPoller.stop();
+  state.activeTaskId = null;
+  state.activeTaskType = null;
+  window.localStorage.removeItem(activeTaskStorageKey);
 }
 
 function resolveAsyncTaskStatusText(task) {

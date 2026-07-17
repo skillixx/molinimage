@@ -26,12 +26,17 @@ interface Poller {
 }
 
 const pollerModulePath = pathToFileURL(resolve("public/assets/image-task-poller.js")).href;
-const { createImageTaskPoller, isTerminalImageTaskStatus, resolveImageTaskProgressStage } =
-  (await import(pollerModulePath)) as {
-    createImageTaskPoller: (options: PollerOptions) => Poller;
-    isTerminalImageTaskStatus: (status: string) => boolean;
-    resolveImageTaskProgressStage: (status: string) => string;
-  };
+const {
+  createImageTaskPoller,
+  isActiveImageTaskStatus,
+  isTerminalImageTaskStatus,
+  resolveImageTaskProgressStage
+} = (await import(pollerModulePath)) as {
+  createImageTaskPoller: (options: PollerOptions) => Poller;
+  isActiveImageTaskStatus: (status: string) => boolean;
+  isTerminalImageTaskStatus: (status: string) => boolean;
+  resolveImageTaskProgressStage: (status: string) => string;
+};
 
 void test("图片任务状态会映射到真实的前端进度阶段", () => {
   assert.equal(resolveImageTaskProgressStage("billing_reserved"), "reserving");
@@ -42,6 +47,12 @@ void test("图片任务状态会映射到真实的前端进度阶段", () => {
   assert.equal(resolveImageTaskProgressStage("failed"), "failed");
   assert.equal(isTerminalImageTaskStatus("billing_pending"), false);
   assert.equal(isTerminalImageTaskStatus("cancelled"), true);
+  for (const status of ["pending", "billing_reserved", "queued", "running", "billing_pending"]) {
+    assert.equal(isActiveImageTaskStatus(status), true, `${status} 应保持工作台任务活动状态`);
+  }
+  for (const status of ["succeeded", "failed", "cancelled"]) {
+    assert.equal(isActiveImageTaskStatus(status), false, `${status} 应解除工作台任务锁定`);
+  }
 });
 
 void test("轮询器按退避间隔查询并在任务成功后停止", async () => {

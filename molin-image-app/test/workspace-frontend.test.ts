@@ -147,6 +147,8 @@ void test("工作台五种图片能力统一使用异步轮询、幂等提交和
   assert.match(poller, /onTransientError/);
   assert.match(poller, /onTerminalError/);
   assert.match(poller, /isTerminalImageTaskStatus/);
+  assert.match(poller, /isActiveImageTaskStatus/);
+  assert.match(workbench, /clearActiveImageTask/);
 });
 
 void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风格模板体验", async () => {

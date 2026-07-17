@@ -4,6 +4,11 @@ export function isTerminalImageTaskStatus(status) {
   return terminalStatuses.has(status);
 }
 
+export function isActiveImageTaskStatus(status) {
+  // 只对白名单终态解除锁定；后端未来新增中间态时继续轮询，避免提前创建任务和重复计费。
+  return !isTerminalImageTaskStatus(status);
+}
+
 export function resolveImageTaskProgressStage(status) {
   if (status === "pending" || status === "billing_reserved") return "reserving";
   if (status === "queued" || status === "running") return "generating";
@@ -56,7 +61,7 @@ export function createImageTaskPoller({
       // 切换轮询任务后丢弃旧请求结果，避免旧任务覆盖当前结果区。
       if (stopped || activeTaskId !== taskId) return;
       await onTask(result);
-      if (isTerminalImageTaskStatus(result.task.status)) {
+      if (!isActiveImageTaskStatus(result.task.status)) {
         stop();
         return;
       }
