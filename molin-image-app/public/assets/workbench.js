@@ -56,6 +56,7 @@ const state = {
   estimate: null,
   estimateRequestId: 0,
   isSubmitting: false,
+  isStartingNewTask: false,
   activeTaskId: null,
   activeTaskType: null,
   referenceFileId: null,
@@ -2698,11 +2699,13 @@ function renderTaskResult(result) {
 
   if (result.task.status === "failed" || result.task.status === "cancelled") {
     elements.resultList.append(createFailedResultCard(result.task));
+    appendTerminalTaskActions(result.task);
     return;
   }
 
   if (result.task.text_result !== null && result.task.text_result.length > 0) {
     elements.resultList.append(createTextResultCard(result.task.text_result));
+    appendTerminalTaskActions(result.task);
     return;
   }
 
@@ -2714,6 +2717,7 @@ function renderTaskResult(result) {
     for (const file of files.slice(1)) {
       elements.resultList.append(createImageResultCard(file, result.task));
     }
+    appendTerminalTaskActions(result.task);
     return;
   }
 
@@ -2726,12 +2730,54 @@ function renderTaskResult(result) {
     empty.className = "empty-text";
     empty.textContent = "任务已提交，暂无结果文件。";
     elements.resultList.append(empty);
+    appendTerminalTaskActions(result.task);
     return;
   }
 
   for (const file of files) {
     elements.resultList.append(createImageResultCard(file, result.task));
   }
+
+  appendTerminalTaskActions(result.task);
+}
+
+function appendTerminalTaskActions(task) {
+  if (isActiveImageTaskStatus(task.status)) return;
+
+  const section = document.createElement("section");
+  const copy = document.createElement("div");
+  const title = document.createElement("strong");
+  const detail = document.createElement("p");
+  const button = document.createElement("button");
+
+  section.className = "terminal-task-actions";
+  section.dataset.taskId = task.id;
+  copy.className = "terminal-task-actions-copy";
+  title.textContent = task.status === "succeeded" ? "本次创作已完成" : "本次任务已结束";
+  detail.textContent = "作品已保留到历史记录，可以继续创建新的内容。";
+  button.type = "button";
+  button.className = "primary-button terminal-new-task-button";
+  button.textContent = "创建新任务";
+  button.addEventListener("click", () => {
+    beginNewTaskDraft(button);
+  });
+  copy.append(title, detail);
+  section.append(copy, button);
+  elements.resultList.append(section);
+}
+
+function beginNewTaskDraft(button) {
+  if (state.isStartingNewTask) return;
+
+  // 先锁定按钮并移除终态结果，避免快速点击重复建立前端草稿。
+  state.isStartingNewTask = true;
+  button.disabled = true;
+  button.textContent = "正在准备";
+  clearError();
+  elements.resultList.replaceChildren();
+  renderProgress("idle");
+  state.isStartingNewTask = false;
+  updatePrimaryActionState();
 }
 
 function createImageRestoreComparison(inputFile, resultFile, task) {

@@ -1980,6 +1980,41 @@ body[data-active-mode="image_to_text"] .model-field select {
   color: var(--text-secondary);
 }
 
+.terminal-task-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px 16px;
+  border: 1px solid #cfe0d7;
+  border-radius: 8px;
+  background: #f3faf6;
+}
+
+.terminal-task-actions-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.terminal-task-actions-copy strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.terminal-task-actions-copy p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.terminal-new-task-button {
+  flex: 0 0 auto;
+  min-width: 118px;
+}
+
 .history-panel > .panel-heading {
   padding: 0 0 13px;
 }
@@ -3419,6 +3454,16 @@ body[data-active-mode="image_to_text"] .model-field select {
 
   .action-row {
     grid-template-columns: 1fr;
+  }
+
+  .terminal-task-actions {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 11px;
+  }
+
+  .terminal-new-task-button {
+    width: 100%;
   }
 
   .submit-dock {

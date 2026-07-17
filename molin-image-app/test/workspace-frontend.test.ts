@@ -151,6 +151,18 @@ void test("工作台五种图片能力统一使用异步轮询、幂等提交和
   assert.match(workbench, /clearActiveImageTask/);
 });
 
+void test("终态结果统一提供创建新任务入口并防止重复点击", async () => {
+  const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
+  const styles = await readFile(resolve("public", "assets", "styles.css"), "utf8");
+
+  assert.match(workbench, /appendTerminalTaskActions/);
+  assert.match(workbench, /创建新任务/);
+  assert.match(workbench, /isStartingNewTask/);
+  assert.match(workbench, /task.status === "failed"[\s\S]*重试/);
+  assert.match(styles, /\.terminal-task-actions/);
+  assert.match(styles, /@media[\s\S]*\.terminal-task-actions/);
+});
+
 void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风格模板体验", async () => {
   const html = await readFile(resolve("public", "index.html"), "utf8");
   const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
