@@ -15,7 +15,7 @@ import {
 import { createImageAnnotationEditor } from "./image-annotation-editor.js";
 import {
   createImageTaskPoller,
-  isTerminalImageTaskStatus,
+  isActiveImageTaskStatus,
   resolveImageTaskProgressStage
 } from "./image-task-poller.js";
 import {
@@ -56,6 +56,8 @@ const state = {
   estimate: null,
   estimateRequestId: 0,
   isSubmitting: false,
+  isStartingNewTask: false,
+  draftIdempotencyKey: createSubmissionIdempotencyKey(),
   activeTaskId: null,
   activeTaskType: null,
   referenceFileId: null,
@@ -395,6 +397,13 @@ elements.historyLoadMore.addEventListener("click", () => {
   void refreshHistory({ append: true });
 });
 elements.imageInput.addEventListener("change", () => {
+  const selectedFile = elements.imageInput.files?.[0];
+
+  // 部分浏览器取消文件选择时会发出空 change；此时必须保留已选历史图片和预览状态。
+  if (selectedFile === undefined) {
+    return;
+  }
+
   // 用户重新选择本地图片时，清掉“再次编辑”带来的历史关系，避免一次提交混用两个输入来源。
   clearReeditSource();
   state.imageRestoreAnnotationApplied = false;
@@ -2032,10 +2041,12 @@ async function createQueuedImageTask(input) {
   if (pendingSubmission === null) {
     if (input === undefined) throw new Error("没有可恢复的待提交任务。");
     pendingSubmission = {
-      idempotency_key: createSubmissionIdempotencyKey(),
+      idempotency_key: state.draftIdempotencyKey ?? createSubmissionIdempotencyKey(),
       task_type: input.task_type,
       input
     };
+    // 幂等键绑定到待提交记录后，刷新恢复必须继续使用 sessionStorage 中的原值。
+    state.draftIdempotencyKey = null;
     // 在发起 POST 前保存完整提交边界，刷新后必须复用同一幂等键和输入文件 ID。
     window.sessionStorage.setItem(pendingSubmissionStorageKey, JSON.stringify(pendingSubmission));
   }
@@ -2113,9 +2124,16 @@ function acceptAsyncImageTask(result) {
   elements.actionHint.textContent = `任务 ${result.task.id} 已进入队列，正在等待处理`;
   updatePrimaryActionState();
 
-  if (isTerminalImageTaskStatus(result.task.status)) {
+  if (!isActiveImageTaskStatus(result.task.status)) {
     void handlePolledImageTask(result);
     return;
+  }
+
+  // 重试任务进入队列后移除旧终态按钮，防止用户在新任务处理中再次操作旧结果。
+  if (result.task.task_type === "image_to_text") {
+    elements.resultList.replaceChildren();
+  } else {
+    renderGenerationLoading("任务已进入队列，正在等待处理");
   }
 
   imageTaskPoller.start(result.task.id);
@@ -2129,17 +2147,15 @@ async function handlePolledImageTask(result) {
   elements.actionHint.textContent = resolveAsyncTaskStatusText(task);
 
   // 结算待处理时结果文件已经生成，可以先展示；轮询继续等待最终结算状态。
-  if (isTerminalImageTaskStatus(task.status) || task.status === "billing_pending") {
+  if (!isActiveImageTaskStatus(task.status) || task.status === "billing_pending") {
     renderTaskResult(result);
   }
 
-  if (!isTerminalImageTaskStatus(task.status)) {
+  if (isActiveImageTaskStatus(task.status)) {
     return;
   }
 
-  state.activeTaskId = null;
-  state.activeTaskType = null;
-  window.localStorage.removeItem(activeTaskStorageKey);
+  clearActiveImageTask();
   updatePrimaryActionState();
   await Promise.all([refreshEstimate(), refreshHistory()]);
 }
@@ -2149,13 +2165,19 @@ function handleTaskPollingError() {
 }
 
 function handleTaskPollingTerminalError(error) {
-  state.activeTaskId = null;
-  state.activeTaskType = null;
-  window.localStorage.removeItem(activeTaskStorageKey);
+  clearActiveImageTask();
   renderProgress("failed");
   if (state.mode !== "image_to_text") renderGenerationFailure();
   updatePrimaryActionState();
   showError(error instanceof Error ? error.message : "任务状态无法继续查询，请重新进入工作台。");
+}
+
+function clearActiveImageTask() {
+  // 活动任务只代表仍需轮询的服务端任务；终态或永久错误到达后必须同步释放内存与浏览器锁定。
+  imageTaskPoller.stop();
+  state.activeTaskId = null;
+  state.activeTaskType = null;
+  window.localStorage.removeItem(activeTaskStorageKey);
 }
 
 function resolveAsyncTaskStatusText(task) {
@@ -2694,11 +2716,13 @@ function renderTaskResult(result) {
 
   if (result.task.status === "failed" || result.task.status === "cancelled") {
     elements.resultList.append(createFailedResultCard(result.task));
+    appendTerminalTaskActions(result.task);
     return;
   }
 
   if (result.task.text_result !== null && result.task.text_result.length > 0) {
     elements.resultList.append(createTextResultCard(result.task.text_result));
+    appendTerminalTaskActions(result.task);
     return;
   }
 
@@ -2710,6 +2734,7 @@ function renderTaskResult(result) {
     for (const file of files.slice(1)) {
       elements.resultList.append(createImageResultCard(file, result.task));
     }
+    appendTerminalTaskActions(result.task);
     return;
   }
 
@@ -2722,12 +2747,111 @@ function renderTaskResult(result) {
     empty.className = "empty-text";
     empty.textContent = "任务已提交，暂无结果文件。";
     elements.resultList.append(empty);
+    appendTerminalTaskActions(result.task);
     return;
   }
 
   for (const file of files) {
     elements.resultList.append(createImageResultCard(file, result.task));
   }
+
+  appendTerminalTaskActions(result.task);
+}
+
+function appendTerminalTaskActions(task) {
+  if (isActiveImageTaskStatus(task.status)) return;
+
+  const section = document.createElement("section");
+  const copy = document.createElement("div");
+  const title = document.createElement("strong");
+  const detail = document.createElement("p");
+  const button = document.createElement("button");
+
+  section.className = "terminal-task-actions";
+  section.dataset.taskId = task.id;
+  copy.className = "terminal-task-actions-copy";
+  title.textContent = task.status === "succeeded" ? "本次创作已完成" : "本次任务已结束";
+  detail.textContent =
+    task.status === "succeeded"
+      ? "作品已保留到历史记录，可以继续创建新的内容。"
+      : "可以返回新的创作草稿，重新填写内容并创建任务。";
+  button.type = "button";
+  button.className = "primary-button terminal-new-task-button";
+  button.textContent = "创建新任务";
+  button.addEventListener("click", () => {
+    startNewDraft(button);
+  });
+  copy.append(title, detail);
+  section.append(copy, button);
+  elements.resultList.append(section);
+}
+
+function startNewDraft(button) {
+  if (state.isStartingNewTask || state.activeTaskId !== null) return;
+
+  // 新草稿只清理浏览器侧上下文，服务端任务、结果文件和历史作品继续保留。
+  state.isStartingNewTask = true;
+  button.disabled = true;
+  button.textContent = "正在准备";
+  clearActiveImageTask();
+  window.sessionStorage.removeItem(pendingSubmissionStorageKey);
+  state.draftIdempotencyKey = createSubmissionIdempotencyKey();
+  // 让上一草稿仍在途的估价响应失效，避免旧价格覆盖新任务参数。
+  state.estimateRequestId += 1;
+  state.estimate = null;
+  resetCreationFormForMode();
+  clearError();
+  elements.resultList.replaceChildren();
+  renderProgress("idle");
+  state.isStartingNewTask = false;
+  updatePrimaryActionState();
+  void Promise.all([refreshEstimate(), refreshHistory()]);
+}
+
+function resetCreationFormForMode() {
+  // 五种能力共享上传控件，建立新草稿时统一释放本地预览、历史引用和标注结果。
+  clearReeditSource();
+  revokeLocalPreviewUrl();
+  elements.imageInput.value = "";
+  state.imageToImageUploadMeta = null;
+  state.imageToImageUploadError = null;
+  state.isValidatingImage = false;
+  state.annotationSourceTask = null;
+  state.annotationSourceFile = null;
+  state.annotationPurpose = null;
+
+  state.textToImageStep = 1;
+  state.textToImageCompletedStep = 0;
+  state.textToImageStyleCategory = "all";
+  state.textToImageSizeGroup = "square";
+  state.textToImageDraft = null;
+
+  state.imageToImageStep = 1;
+  state.imageToImageCompletedStep = 0;
+  state.imageToImageCategory = "common";
+  state.imageToImageSizeGroup = "square";
+  state.imageToImageSmartMode = true;
+  state.imageToImageParameterValues = createImageEditParameterValues();
+
+  state.imageRestoreStep = 1;
+  state.imageRestoreCompletedStep = 0;
+  state.imageRestoreCategory = "all";
+  state.imageRestoreModeCode = "smart_restore";
+  state.imageRestoreParameterValues = createImageRestoreParameterValues();
+  state.imageRestoreOutputPolicy = "keep_original";
+  state.imageRestoreAnnotationApplied = false;
+
+  elements.promptInput.value = "";
+  elements.stylePresetSelect.value = "";
+  elements.editModeSelect.value = "keep_subject";
+  elements.restoreTypeSelect.value = getImageRestoreMode("smart_restore").backend_preset_id;
+  elements.qualitySelect.value = "standard";
+  elements.sizeSelect.value = "1024x1024";
+  elements.countSelect.value = "1";
+  elements.upscaleFactorSelect.value = "2";
+  renderActiveModeControls();
+  renderUploadHint();
+  syncPromptInputState();
 }
 
 function createImageRestoreComparison(inputFile, resultFile, task) {

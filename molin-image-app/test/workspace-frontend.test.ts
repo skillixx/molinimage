@@ -147,6 +147,46 @@ void test("工作台五种图片能力统一使用异步轮询、幂等提交和
   assert.match(poller, /onTransientError/);
   assert.match(poller, /onTerminalError/);
   assert.match(poller, /isTerminalImageTaskStatus/);
+  assert.match(poller, /isActiveImageTaskStatus/);
+  assert.match(workbench, /clearActiveImageTask/);
+});
+
+void test("终态结果统一提供创建新任务入口并防止重复点击", async () => {
+  const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
+  const styles = await readFile(resolve("public", "assets", "styles.css"), "utf8");
+
+  assert.match(workbench, /appendTerminalTaskActions/);
+  assert.match(workbench, /创建新任务/);
+  assert.match(workbench, /isStartingNewTask/);
+  assert.match(workbench, /task.status === "failed"[\s\S]*重试/);
+  assert.match(styles, /\.terminal-task-actions/);
+  assert.match(styles, /@media[\s\S]*\.terminal-task-actions/);
+});
+
+void test("创建新任务会建立新的幂等草稿并安全清理旧任务上下文", async () => {
+  const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
+
+  assert.match(workbench, /function startNewDraft/);
+  assert.match(workbench, /draftIdempotencyKey/);
+  assert.match(workbench, /state\.draftIdempotencyKey \?\? createSubmissionIdempotencyKey\(\)/);
+  assert.match(
+    workbench,
+    /function startNewDraft[\s\S]*clearActiveImageTask\(\)[\s\S]*sessionStorage\.removeItem\(pendingSubmissionStorageKey\)/
+  );
+  assert.match(workbench, /function resetCreationFormForMode/);
+  assert.match(workbench, /textToImageStep = 1/);
+  assert.match(workbench, /imageToImageStep = 1/);
+  assert.match(workbench, /imageRestoreStep = 1/);
+  assert.match(workbench, /imageTaskPoller\.stop\(\)/);
+});
+
+void test("重新选择图片时取消文件选择应保留当前历史原图", async () => {
+  const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
+
+  assert.match(
+    workbench,
+    /elements\.imageInput\.addEventListener\("change", \(\) => \{[\s\S]*?const selectedFile = elements\.imageInput\.files\?\.\[0\];[\s\S]*?if \(selectedFile === undefined\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?clearReeditSource\(\);/
+  );
 });
 
 void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风格模板体验", async () => {
