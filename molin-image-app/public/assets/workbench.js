@@ -397,6 +397,13 @@ elements.historyLoadMore.addEventListener("click", () => {
   void refreshHistory({ append: true });
 });
 elements.imageInput.addEventListener("change", () => {
+  const selectedFile = elements.imageInput.files?.[0];
+
+  // 部分浏览器取消文件选择时会发出空 change；此时必须保留已选历史图片和预览状态。
+  if (selectedFile === undefined) {
+    return;
+  }
+
   // 用户重新选择本地图片时，清掉“再次编辑”带来的历史关系，避免一次提交混用两个输入来源。
   clearReeditSource();
   state.imageRestoreAnnotationApplied = false;

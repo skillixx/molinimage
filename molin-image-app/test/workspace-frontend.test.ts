@@ -180,6 +180,15 @@ void test("创建新任务会建立新的幂等草稿并安全清理旧任务上
   assert.match(workbench, /imageTaskPoller\.stop\(\)/);
 });
 
+void test("重新选择图片时取消文件选择应保留当前历史原图", async () => {
+  const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
+
+  assert.match(
+    workbench,
+    /elements\.imageInput\.addEventListener\("change", \(\) => \{[\s\S]*?const selectedFile = elements\.imageInput\.files\?\.\[0\];[\s\S]*?if \(selectedFile === undefined\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?clearReeditSource\(\);/
+  );
+});
+
 void test("MVP 前端源码覆盖余额禁用、进度、下载、复制和风格模板体验", async () => {
   const html = await readFile(resolve("public", "index.html"), "utf8");
   const workbench = await readFile(resolve("public", "assets", "workbench.js"), "utf8");
